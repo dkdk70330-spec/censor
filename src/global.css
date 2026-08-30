@@ -1,4 +1,6 @@
+:root { font-family: "Pretendard", "Segoe UI", "Malgun Gothic", sans-serif; color: #17202f; background: #f6f7f9; font-synthesis: none; }
 * { box-sizing: border-box; }
-html, body, #root { margin: 0; min-height: 100%; font-family: Inter, "Malgun Gothic", sans-serif; }
-body { color: #3f3548; }
-button, input, select { font: inherit; }
+html, body, #root { margin: 0; width: 100%; min-width: 320px; min-height: 100%; height: 100%; }
+body { overflow: hidden; }
+button, input { font: inherit; }
+button { color: inherit; }
