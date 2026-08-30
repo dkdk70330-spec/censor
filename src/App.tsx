@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Brush, Check, ChevronDown, Download, Eraser, Eye, ImagePlus, LoaderCircle, Lock, Maximize2, MousePointer2, Redo2, ScanSearch, ShieldCheck, Trash2, Undo2, Upload } from "lucide-react";
-import { CENSOR_PRESETS, CUSTOM_CLASS_OPTIONS, DEFAULT_CUSTOM_CLASS_IDS, filterDetections, type CensorEffect, type CensorLevel } from "./lib/censor";
+import { CENSOR_PRESETS, CUSTOM_CLASS_OPTIONS, DEFAULT_CUSTOM_CLASS_IDS, filterDetections, summarizeDetections, type CensorEffect, type CensorLevel } from "./lib/censor";
 import { detectNudity } from "./lib/nudenet";
 import "./editor.css";
 import "./settings.css";
@@ -222,7 +222,10 @@ export function App() {
         return { id: uid(), x, y, width: Math.min(image.naturalWidth - x, item.width + padding * 2), height: Math.min(image.naturalHeight - y, item.height + padding * 2), label: item.label, score: item.score, classId: item.id };
       });
       commit({ ...editorRef.current, rects: [...editorRef.current.rects, ...rects] });
-      setMessage(rects.length ? `${rawDetections.length}개 탐지 중 선택한 부위 ${rects.length}개를 검열 영역으로 생성했습니다.` : `${rawDetections.length}개를 탐지했지만 현재 검열 수준에 포함되는 부위가 없습니다.`);
+      const summary = summarizeDetections(rawDetections);
+      setMessage(rects.length
+        ? `${rawDetections.length}개 탐지 중 검열 대상 ${rects.length}개를 생성했습니다. 탐지 결과: ${summary}`
+        : `${rawDetections.length}개 탐지됨(${summary || "분류 없음"}). 현재 검열 범위에는 해당 부위가 없습니다. 검열 수준을 넓히거나 직접 설정을 확인하세요.`);
     } catch (error) {
       console.error(error);
       setMessage("AI 분석에 실패했습니다. WebGL 지원 여부와 모델 파일을 확인해 주세요.");
@@ -322,9 +325,9 @@ export function App() {
           <div className="section-label">AI 자동 검열</div>
           <div className="ai-card">
             <div className="ai-card-title"><div className="ai-icon"><ScanSearch size={18} /></div><div><strong>NudeNet TFJS</strong><small>브라우저 내 로컬 추론</small></div></div>
-            <div className="setting-row"><span>탐지 민감도</span><strong>{Math.round(sensitivity * 100)}%</strong></div>
-            <input className="full-range" aria-label="탐지 민감도" type="range" min="0.1" max="0.8" step="0.05" value={sensitivity} onChange={(e) => setSensitivity(Number(e.target.value))} />
-            <p>기준을 낮추면 더 많이 탐지하지만 오탐이 증가할 수 있습니다.</p>
+            <div className="setting-row"><span>최소 신뢰도</span><strong>{Math.round(sensitivity * 100)}%</strong></div>
+            <input className="full-range" aria-label="최소 탐지 신뢰도" type="range" min="0.1" max="0.8" step="0.05" value={sensitivity} onChange={(e) => setSensitivity(Number(e.target.value))} />
+            <p>이 값은 탐지 개수만 조절합니다. 낮추면 오탐이 늘 수 있으며, 아래 검열 수준에서 실제 검열 부위를 선택합니다.</p>
             <button className="analyze-button" onClick={runDetection} disabled={!image || analyzing}>{analyzing ? <LoaderCircle className="spin" size={17} /> : <ScanSearch size={17} />}{analyzing ? `분석 중 ${Math.round(modelProgress * 100)}%` : "AI 검열 실행"}</button>
           </div>
         </section>

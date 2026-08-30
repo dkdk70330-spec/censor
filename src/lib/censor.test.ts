@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CENSOR_PRESETS, DEFAULT_CUSTOM_CLASS_IDS, filterDetections, selectedClassIds } from "./censor";
+import { CENSOR_PRESETS, DEFAULT_CUSTOM_CLASS_IDS, filterDetections, selectedClassIds, summarizeDetections } from "./censor";
 import type { NudeDetection } from "./nudenet";
 
 const detection = (id: number): NudeDetection => ({ id, label: `id-${id}`, score: 0.8, x: 0, y: 0, width: 20, height: 20 });
@@ -30,5 +30,11 @@ describe("censorship levels", () => {
   it("creates an ID 15 censor candidate instead of dropping it", () => {
     expect(filterDetections([detection(15)], "genitals", [])).toHaveLength(1);
   });
-});
 
+  it("summarizes unselected detections so filtering is visible to users", () => {
+    const detections = [detection(6), detection(6), detection(3)];
+    detections[0].label = detections[1].label = "여성 얼굴";
+    detections[2].label = "노출된 복부";
+    expect(summarizeDetections(detections)).toBe("여성 얼굴 2, 노출된 복부 1");
+  });
+});

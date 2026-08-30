@@ -33,3 +33,11 @@ export function filterDetections(
   return detections.filter((detection) => selected.has(detection.id));
 }
 
+export function summarizeDetections(detections: readonly NudeDetection[]) {
+  const counts = new Map<string, number>();
+  detections.forEach(({ label }) => counts.set(label, (counts.get(label) ?? 0) + 1));
+  return [...counts.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .map(([label, count]) => `${label} ${count}`)
+    .join(", ");
+}
