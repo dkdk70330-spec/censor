@@ -1,6 +1,6 @@
 import * as tf from "@tensorflow/tfjs";
 
-export type NudeDetection = { id: number; label: string; score: number; x: number; y: number; width: number; height: number };
+export type NudeDetection = { id: number; label: string; score: number; x: number; y: number; width: number; height: number; rawBox?: readonly number[] };
 
 export const LABELS = [
   "노출된 항문", "노출된 겨드랑이", "복부", "노출된 복부", "엉덩이", "노출된 엉덩이",
@@ -27,7 +27,9 @@ export function normalizeDetections(
   const sy = sourceHeight / inputHeight;
   return selected.map((index) => {
     const classId = Number(classes[index]);
-    const [y1, x1, y2, x2] = boxes[0][index];
+    // This NudeNet RetinaNet graph emits [x1, y1, x2, y2].
+    const rawBox = boxes[0][index];
+    const [x1, y1, x2, y2] = rawBox;
     return {
       id: classId,
       label: LABELS[classId] ?? `클래스 ${classId}`,
@@ -36,6 +38,7 @@ export function normalizeDetections(
       y: Math.max(0, y1 * sy),
       width: Math.min(sourceWidth - x1 * sx, (x2 - x1) * sx),
       height: Math.min(sourceHeight - y1 * sy, (y2 - y1) * sy),
+      rawBox,
     };
   }).filter((item) => Number.isFinite(item.score) && item.width > 2 && item.height > 2);
 }
@@ -59,8 +62,16 @@ export async function detectNudity(image: HTMLImageElement, minScore = 0.25, onP
     outputs.forEach((tensor) => tensor.dispose());
     const detections = normalizeDetections(boxes, scores, classes, selected, image.naturalWidth, image.naturalHeight, inputWidth, inputHeight);
     console.groupCollapsed(`[NudeNet] 필터링 전 탐지 결과 ${detections.length}개`);
-    console.table(detections.map(({ id, label, score, x, y, width, height }) => ({
-      classId: id, label, score: Number(score.toFixed(4)), box: [x, y, width, height].map(Math.round),
+    console.info("좌표 변환", {
+      modelInput: { width: inputWidth, height: inputHeight },
+      sourceImage: { width: image.naturalWidth, height: image.naturalHeight },
+      scaleX: image.naturalWidth / inputWidth,
+      scaleY: image.naturalHeight / inputHeight,
+      boxOrder: "[x1, y1, x2, y2]",
+    });
+    console.table(detections.map(({ id, label, score, x, y, width, height, rawBox }) => ({
+      classId: id, label, score: Number(score.toFixed(4)), rawBox,
+      transformedBox: [x, y, width, height].map((value) => Number(value.toFixed(2))),
     })));
     console.groupEnd();
     return detections;
