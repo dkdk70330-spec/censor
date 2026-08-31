@@ -1,0 +1,4 @@
+EraX-Anti-NSFW-V1.1 (YOLO11 Small)
+Source: https://huggingface.co/erax-ai/EraX-Anti-NSFW-V1.1
+License: Apache License 2.0
+Converted from the official PyTorch checkpoint to ONNX opset 17 for local browser inference.

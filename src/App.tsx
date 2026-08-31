@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Brush, Check, ChevronDown, Download, Eraser, Eye, ImagePlus, LoaderCircle, Lock, Maximize2, MousePointer2, Redo2, ScanSearch, ShieldCheck, Trash2, Undo2, Upload } from "lucide-react";
 import { CENSOR_PRESETS, CUSTOM_CLASS_OPTIONS, DEFAULT_CUSTOM_CLASS_IDS, filterDetections, summarizeDetections, type CensorEffect, type CensorLevel } from "./lib/censor";
-import { detectNudity } from "./lib/nudenet";
+import { detectNudity } from "./lib/erax";
 import "./editor.css";
 import "./settings.css";
 
@@ -210,11 +210,11 @@ export function App() {
     if (!image || analyzing) return;
     setAnalyzing(true);
     setModelProgress(0);
-    setMessage("NudeNet 모델을 준비하고 있습니다…");
+    setMessage("EraX Small 모델을 준비하고 있습니다…");
     try {
       const rawDetections = await detectNudity(image, sensitivity, setModelProgress);
       const detections = filterDetections(rawDetections, level, customIds);
-      console.info("[NudeNet] 사용자 검열 설정", { level, selectedIds: level === "custom" ? customIds : CENSOR_PRESETS[level], before: rawDetections.length, after: detections.length });
+      console.info("[EraX] 사용자 검열 설정", { level, selectedIds: level === "custom" ? customIds : CENSOR_PRESETS[level], before: rawDetections.length, after: detections.length });
       const rects = detections.map((item) => {
         const padding = Math.max(8, Math.min(item.width, item.height) * 0.08);
         const x = clamp(item.x - padding, 0, image.naturalWidth);
@@ -228,7 +228,7 @@ export function App() {
         : `${rawDetections.length}개 탐지됨(${summary || "분류 없음"}). 현재 검열 범위에는 해당 부위가 없습니다. 검열 수준을 넓히거나 직접 설정을 확인하세요.`);
     } catch (error) {
       console.error(error);
-      setMessage("AI 분석에 실패했습니다. WebGL 지원 여부와 모델 파일을 확인해 주세요.");
+      setMessage("AI 분석에 실패했습니다. ONNX Runtime 지원 여부와 모델 파일을 확인해 주세요.");
     } finally { setAnalyzing(false); }
   };
 
@@ -324,7 +324,7 @@ export function App() {
         <section>
           <div className="section-label">AI 자동 검열</div>
           <div className="ai-card">
-            <div className="ai-card-title"><div className="ai-icon"><ScanSearch size={18} /></div><div><strong>NudeNet TFJS</strong><small>브라우저 내 로컬 추론</small></div></div>
+            <div className="ai-card-title"><div className="ai-icon"><ScanSearch size={18} /></div><div><strong>EraX Small</strong><small>브라우저 내 ONNX 로컬 추론</small></div></div>
             <div className="setting-row"><span>최소 신뢰도</span><strong>{Math.round(sensitivity * 100)}%</strong></div>
             <input className="full-range" aria-label="최소 탐지 신뢰도" type="range" min="0.1" max="0.8" step="0.05" value={sensitivity} onChange={(e) => setSensitivity(Number(e.target.value))} />
             <p>이 값은 탐지 개수만 조절합니다. 낮추면 오탐이 늘 수 있으며, 아래 검열 수준에서 실제 검열 부위를 선택합니다.</p>

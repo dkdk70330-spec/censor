@@ -1,24 +1,22 @@
-import type { NudeDetection } from "./nudenet";
+import type { NudeDetection } from "./erax";
 
 export type CensorLevel = "genitals" | "major" | "all" | "custom";
 export type CensorEffect = "white" | "blur" | "mosaic";
 
 export const CENSOR_PRESETS: Record<Exclude<CensorLevel, "custom">, readonly number[]> = {
-  genitals: [13, 15],
-  major: [0, 11, 13, 15],
-  all: [0, 5, 11, 13, 15],
+  genitals: [3, 4],
+  major: [0, 3, 4],
+  all: [0, 2, 3, 4],
 };
 
 export const CUSTOM_CLASS_OPTIONS = [
-  { id: 15, label: "남성 성기" },
-  { id: 13, label: "여성 성기" },
+  { id: 3, label: "남성 성기" },
+  { id: 4, label: "여성 성기" },
   { id: 0, label: "항문" },
-  { id: 11, label: "여성 유방" },
-  { id: 5, label: "엉덩이" },
-  { id: 12, label: "가려진 여성 성기까지 감지" },
+  { id: 2, label: "유두" },
 ] as const;
 
-export const DEFAULT_CUSTOM_CLASS_IDS = [0, 5, 11, 13, 15];
+export const DEFAULT_CUSTOM_CLASS_IDS = [0, 2, 3, 4];
 
 export function selectedClassIds(level: CensorLevel, customIds: readonly number[]) {
   return new Set(level === "custom" ? customIds : CENSOR_PRESETS[level]);
