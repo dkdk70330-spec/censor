@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Brush, Check, ChevronDown, Download, Eraser, Eye, ImagePlus, LoaderCircle, Lock, Maximize2, MousePointer2, Redo2, ScanSearch, ShieldCheck, Trash2, Undo2, Upload } from "lucide-react";
+import { Brush, Check, ChevronDown, CloudDownload, Download, Eraser, Eye, ImagePlus, LoaderCircle, Lock, Maximize2, MousePointer2, Redo2, ScanSearch, ShieldCheck, Trash2, Undo2, Upload } from "lucide-react";
 import { CENSOR_PRESETS, CUSTOM_CLASS_OPTIONS, DEFAULT_CUSTOM_CLASS_IDS, filterDetections, summarizeDetections, type CensorEffect, type CensorLevel } from "./lib/censor";
 import { detectNudity } from "./lib/erax";
+import { downloadHqSam2, formatModelBytes, getHqSam2Status, isTauriRuntime, type HqSam2Status } from "./lib/hqsam2";
 import "./editor.css";
 import "./settings.css";
 
@@ -111,11 +112,34 @@ export function App() {
   const [blurStrength, setBlurStrength] = useState(18);
   const [mosaicSize, setMosaicSize] = useState(18);
   const [correctionView, setCorrectionView] = useState(false);
+  const [desktopRuntime] = useState(isTauriRuntime);
+  const [hqSam2, setHqSam2] = useState<HqSam2Status>({ installed: false, downloading: false, bytes: 0 });
+  const [hqSam2Progress, setHqSam2Progress] = useState(0);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const dragRef = useRef<Drag | null>(null);
   const editorRef = useRef(editor);
   editorRef.current = editor;
+
+  useEffect(() => { if (desktopRuntime) getHqSam2Status().then(setHqSam2).catch(console.error); }, [desktopRuntime]);
+
+  const installHqSam2 = async () => {
+    setHqSam2((current) => ({ ...current, downloading: true }));
+    setMessage("HQ-SAM 2 모델을 다운로드하고 있습니다. 앱을 종료하지 마세요.");
+    try {
+      const status = await downloadHqSam2(({ received, total }) => {
+        setHqSam2Progress(total ? received / total : 0);
+        setHqSam2((current) => ({ ...current, bytes: received, downloading: true }));
+      });
+      setHqSam2(status);
+      setHqSam2Progress(1);
+      setMessage(`HQ-SAM 2 모델 설치 완료 · ${formatModelBytes(status.bytes)}`);
+    } catch (error) {
+      console.error(error);
+      setHqSam2((current) => ({ ...current, downloading: false }));
+      setMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   const effectSettings: EffectSettings = { effect, blur: blurStrength, mosaic: mosaicSize };
 
@@ -330,6 +354,15 @@ export function App() {
             <p>이 값은 탐지 개수만 조절합니다. 낮추면 오탐이 늘 수 있으며, 아래 검열 수준에서 실제 검열 부위를 선택합니다.</p>
             <button className="analyze-button" onClick={runDetection} disabled={!image || analyzing}>{analyzing ? <LoaderCircle className="spin" size={17} /> : <ScanSearch size={17} />}{analyzing ? `분석 중 ${Math.round(modelProgress * 100)}%` : "AI 검열 실행"}</button>
           </div>
+          {desktopRuntime && <div className="ai-card hq-card">
+            <div className="ai-card-title"><div className="ai-icon"><CloudDownload size={18} /></div><div><strong>HQ-SAM 2</strong><small>탐지 사각형을 윤곽 마스크로 정밀화</small></div></div>
+            <p>{hqSam2.installed ? `모델 설치됨 · ${formatModelBytes(hqSam2.bytes)}` : "선택 설치 모델입니다. 공식 체크포인트를 앱 데이터 폴더에 저장합니다."}</p>
+            {hqSam2.downloading && <progress className="model-download-progress" max="1" value={hqSam2Progress} />}
+            <button className="analyze-button secondary" onClick={installHqSam2} disabled={hqSam2.installed || hqSam2.downloading}>
+              {hqSam2.downloading ? <LoaderCircle className="spin" size={17} /> : hqSam2.installed ? <Check size={17} /> : <CloudDownload size={17} />}
+              {hqSam2.downloading ? `다운로드 중 ${hqSam2Progress ? `${Math.round(hqSam2Progress * 100)}%` : `· ${formatModelBytes(hqSam2.bytes)}`}` : hqSam2.installed ? "설치 완료" : "HQ-SAM 2 다운로드"}
+            </button>
+          </div>}
         </section>
 
         <section>

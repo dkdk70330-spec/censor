@@ -1,19 +1,19 @@
 [package]
-name = "charpet"
+name = "veil"
 version = "0.1.0"
-description = "A couple D-Day desktop widget"
+description = "Local AI image censoring editor"
 edition = "2021"
 
 [lib]
-name = "charpet_lib"
+name = "veil_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.2.0", features = [] }
 
 [dependencies]
-tauri = { version = "2.11.0", features = ["protocol-asset", "tray-icon"] }
-tauri-plugin-dialog = "2.7.0"
-tauri-plugin-store = "2.4.0"
+tauri = { version = "2.11.0", features = [] }
 serde = { version = "1", features = ["derive"] }
-uuid = { version = "1.10.0", features = ["v4"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+tokio = { version = "1", features = ["fs", "io-util"] }

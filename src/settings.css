@@ -20,3 +20,6 @@
 .toggle-row i::after { content:""; position:absolute; top:3px; left:3px; width:12px; height:12px; border-radius:50%; background:#fff; box-shadow:0 1px 3px #0003; transition:.2s; }
 .toggle-row input:checked+i { background:#7c3aed; }
 .toggle-row input:checked+i::after { transform:translateX(13px); }
+.hq-card { margin-top:10px; }
+.analyze-button.secondary { background:#312e81; }
+.model-download-progress { width:100%; height:8px; margin:2px 0 8px; accent-color:#7c3aed; }

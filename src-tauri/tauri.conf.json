@@ -1,12 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Charpet",
+  "productName": "Veil",
   "version": "0.1.0",
-  "identifier": "com.charpet.widget",
-  "build": { "frontendDist": "../dist", "devUrl": "http://localhost:1420", "beforeDevCommand": "pnpm run dev", "beforeBuildCommand": "node ./node_modules/vite/bin/vite.js build" },
-  "app": { "withGlobalTauri": false, "windows": [
-    { "label": "widget", "title": "Charpet", "width": 310, "height": 340, "resizable": false, "decorations": false, "transparent": true, "alwaysOnTop": true, "skipTaskbar": true },
-    { "label": "settings", "title": "Charpet 설정", "width": 470, "height": 720, "resizable": true, "visible": false }
-  ], "security": { "csp": "default-src 'self' asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' http://localhost:1420 ws://localhost:1420", "assetProtocol": { "enable": true, "scope": ["$APPDATA/characters/**"] } } },
-  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.svg"] }
+  "identifier": "app.veil.local",
+  "build": { "frontendDist": "../dist", "devUrl": "http://localhost:1420/censor/", "beforeDevCommand": "npm run dev -- --host 127.0.0.1", "beforeBuildCommand": "npm run build" },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [{ "label": "main", "title": "Veil", "width": 1280, "height": 820, "minWidth": 960, "minHeight": 640, "resizable": true }],
+    "security": { "csp": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' http://localhost:1420 ws://localhost:1420" }
+  },
+  "bundle": { "active": true, "targets": ["nsis"], "icon": ["icons/icon.ico", "icons/icon.png"] }
 }

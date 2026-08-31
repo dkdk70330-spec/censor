@@ -1,61 +1,144 @@
-use std::{fs, path::{Path, PathBuf}};
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
-use std::sync::Mutex;
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::menu::{Menu, MenuItem};
+use futures_util::StreamExt;
+use serde::Serialize;
+use std::{
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+};
+use tauri::{AppHandle, Emitter, Manager};
+use tokio::{fs::File, io::AsyncWriteExt};
 
-fn widget(app: &AppHandle) -> Result<WebviewWindow, String> { app.get_webview_window("widget").ok_or("위젯 창을 찾을 수 없습니다.".into()) }
+const HQ_SAM2_FILE: &str = "sam2.1_hq_hiera_large.pt";
+const HQ_SAM2_URL: &str =
+    "https://huggingface.co/lkeab/hq-sam/resolve/main/sam2.1_hq_hiera_large.pt?download=true";
+const HQ_SAM2_BYTES: u64 = 898_844_313;
 
-#[tauri::command]
-fn copy_character_image(app: AppHandle, source_path: String, character: String) -> Result<String, String> {
-  let source = PathBuf::from(&source_path);
-  let metadata = fs::metadata(&source).map_err(|_| "이미지 파일을 읽을 수 없습니다.")?;
-  if metadata.len() > 10 * 1024 * 1024 { return Err("이미지는 파일당 10MB 이하여야 합니다.".into()); }
-  let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-  if !["png", "jpg", "jpeg", "webp"].contains(&ext.as_str()) { return Err("PNG, JPG, WebP 파일만 선택할 수 있습니다.".into()); }
-  let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("characters");
-  fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
-  for old in fs::read_dir(&data_dir).map_err(|e| e.to_string())?.flatten() { if old.file_name().to_string_lossy().starts_with(&format!("{character}.")) { let _ = fs::remove_file(old.path()); } }
-  let target = data_dir.join(format!("{character}.{ext}"));
-  fs::copy(source, &target).map_err(|e| e.to_string())?;
-  Ok(target.to_string_lossy().to_string())
+struct DownloadState(AtomicBool);
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelStatus {
+    installed: bool,
+    downloading: bool,
+    bytes: u64,
+    path: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadProgress {
+    received: u64,
+    total: Option<u64>,
+}
+
+fn model_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("models")
+        .join(HQ_SAM2_FILE))
 }
 
 #[tauri::command]
-fn set_always_on_top(app: AppHandle, value: bool) -> Result<(), String> { widget(&app)?.set_always_on_top(value).map_err(|e| e.to_string()) }
+fn hq_sam2_status(
+    app: AppHandle,
+    state: tauri::State<DownloadState>,
+) -> Result<ModelStatus, String> {
+    let path = model_path(&app)?;
+    let bytes = fs::metadata(&path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    Ok(ModelStatus {
+        installed: bytes == HQ_SAM2_BYTES,
+        downloading: state.0.load(Ordering::Relaxed),
+        bytes,
+        path: (bytes == HQ_SAM2_BYTES).then(|| path.to_string_lossy().to_string()),
+    })
+}
 
-struct LockState(Mutex<bool>);
-fn update_lock(app: &AppHandle, locked: bool) -> Result<(), String> {
-  widget(app)?.set_ignore_cursor_events(locked).map_err(|e| e.to_string())?;
-  *app.state::<LockState>().0.lock().map_err(|_| "잠금 상태를 갱신하지 못했습니다.")? = locked;
-  app.emit("lock-changed", locked).map_err(|e| e.to_string())
+struct DownloadGuard<'a>(&'a AtomicBool);
+impl Drop for DownloadGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
 }
+
 #[tauri::command]
-fn set_locked(app: AppHandle, locked: bool) -> Result<(), String> { update_lock(&app, locked) }
-#[tauri::command]
-fn persist_widget_position(app: AppHandle) -> Result<(), String> {
-  let position = widget(&app)?.outer_position().map_err(|e| e.to_string())?;
-  let path = app.path().app_data_dir().map_err(|e| e.to_string())?.join("widget-position.json");
-  fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).map_err(|e| e.to_string())?;
-  fs::write(path, format!("{{\"x\":{},\"y\":{}}}", position.x, position.y)).map_err(|e| e.to_string())
+async fn download_hq_sam2(
+    app: AppHandle,
+    state: tauri::State<'_, DownloadState>,
+) -> Result<ModelStatus, String> {
+    if state.0.swap(true, Ordering::Relaxed) {
+        return Err("HQ-SAM 2 모델을 이미 다운로드하고 있습니다.".into());
+    }
+    let _guard = DownloadGuard(&state.0);
+    let target = model_path(&app)?;
+    if let Ok(metadata) = fs::metadata(&target) {
+        if metadata.len() == HQ_SAM2_BYTES {
+            return Ok(ModelStatus {
+                installed: true,
+                downloading: false,
+                bytes: metadata.len(),
+                path: Some(target.to_string_lossy().to_string()),
+            });
+        }
+    }
+    tokio::fs::create_dir_all(
+        target
+            .parent()
+            .ok_or("모델 저장 경로를 만들 수 없습니다.")?,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let partial = target.with_extension("pt.part");
+    let response = reqwest::Client::new()
+        .get(HQ_SAM2_URL)
+        .send()
+        .await
+        .map_err(|error| format!("모델 다운로드 연결 실패: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("모델 서버 응답 오류: {}", response.status()));
+    }
+    let total = response.content_length();
+    let mut file = File::create(&partial)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut stream = response.bytes_stream();
+    let mut received = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("모델 다운로드 중 오류: {error}"))?;
+        file.write_all(&chunk)
+            .await
+            .map_err(|error| error.to_string())?;
+        received += chunk.len() as u64;
+        let _ = app.emit(
+            "hq-sam2-download-progress",
+            DownloadProgress { received, total },
+        );
+    }
+    file.flush().await.map_err(|error| error.to_string())?;
+    drop(file);
+    if received != HQ_SAM2_BYTES {
+        return Err(format!(
+            "모델 파일 크기가 올바르지 않습니다: {received}/{HQ_SAM2_BYTES}"
+        ));
+    }
+    tokio::fs::rename(&partial, &target)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(ModelStatus {
+        installed: true,
+        downloading: false,
+        bytes: received,
+        path: Some(target.to_string_lossy().to_string()),
+    })
 }
-fn restore_widget_position(app: &AppHandle) {
-  let Ok(dir) = app.path().app_data_dir() else { return; };
-  let Ok(text) = fs::read_to_string(dir.join("widget-position.json")) else { return; };
-  let fields: Vec<i32> = text.split(|c: char| !c.is_ascii_digit() && c != '-').filter_map(|s| s.parse().ok()).collect();
-  if fields.len() == 2 { let _ = widget(app).and_then(|w| w.set_position(PhysicalPosition::new(fields[0], fields[1])).map_err(|e| e.to_string())); }
-}
+
 pub fn run() {
-  tauri::Builder::default().manage(LockState(Mutex::new(false))).plugin(tauri_plugin_dialog::init()).plugin(tauri_plugin_store::Builder::default().build()).invoke_handler(tauri::generate_handler![copy_character_image, set_always_on_top, set_locked, persist_widget_position]).setup(|app| {
-    restore_widget_position(&app.handle());
-    let settings = MenuItem::with_id(app, "settings", "설정 열기", true, None::<&str>)?;
-    let lock = MenuItem::with_id(app, "lock", "잠금 전환", true, None::<&str>)?;
-    let hide = MenuItem::with_id(app, "hide", "위젯 숨기기", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&settings, &lock, &hide, &quit])?;
-    let tray = TrayIconBuilder::new().menu(&menu);
-    let tray = if let Some(icon) = app.default_window_icon() { tray.icon(icon.clone()) } else { tray };
-    tray.on_menu_event(|app, event| match event.id.as_ref() { "settings" => { if let Some(w) = app.get_webview_window("settings") { let _ = w.show(); let _ = w.set_focus(); } }, "lock" => { let current = *app.state::<LockState>().0.lock().unwrap_or_else(|e| e.into_inner()); let _ = update_lock(app, !current); }, "hide" => { if let Some(w) = app.get_webview_window("widget") { let _ = w.hide(); } }, "quit" => app.exit(0), _ => {} }).on_tray_icon_event(|tray, event| { if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event { if let Some(w) = tray.app_handle().get_webview_window("settings") { let _ = w.show(); let _ = w.set_focus(); } } }).build(app)?;
-    Ok(())
-  }).run(tauri::generate_context!()).expect("error while running Charpet");
+    tauri::Builder::default()
+        .manage(DownloadState(AtomicBool::new(false)))
+        .invoke_handler(tauri::generate_handler![hq_sam2_status, download_hq_sam2])
+        .run(tauri::generate_context!())
+        .expect("error while running Veil");
 }
