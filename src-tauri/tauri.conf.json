@@ -7,7 +7,7 @@
   "app": {
     "withGlobalTauri": false,
     "windows": [{ "label": "main", "title": "Veil", "width": 1280, "height": 820, "minWidth": 960, "minHeight": 640, "resizable": true }],
-    "security": { "csp": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' http://localhost:1420 ws://localhost:1420" }
+    "security": { "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' http://localhost:1420 ws://localhost:1420" }
   },
   "bundle": { "active": true, "targets": ["nsis"], "icon": ["icons/icon.ico", "icons/icon.png"] }
 }

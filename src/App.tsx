@@ -385,7 +385,8 @@ export function App() {
       }
     } catch (error) {
       console.error(error);
-      setMessage("AI 분석에 실패했습니다. ONNX Runtime 지원 여부와 모델 파일을 확인해 주세요.");
+      const detail = error instanceof Error ? error.message : String(error);
+      setMessage(`AI 분석에 실패했습니다: ${detail}`);
     } finally { setAnalyzing(false); }
   };
 
