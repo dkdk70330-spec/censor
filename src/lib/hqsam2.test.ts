@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { forEachMaskRunRectangle, formatModelBytes, isTauriRuntime } from "./hqsam2";
+import { forEachMaskRunRectangle, formatModelBytes, isTauriRuntime, mergeRefinedMasks } from "./hqsam2";
 
 describe("HQ-SAM 2 desktop model helpers", () => {
   it("keeps browser builds outside the Tauri-only download path", () => expect(isTauriRuntime()).toBe(false));
@@ -11,5 +11,10 @@ describe("HQ-SAM 2 desktop model helpers", () => {
     const rectangles: number[][] = [];
     forEachMaskRunRectangle(4, [2, 7], (x, y, length) => rectangles.push([x, y, length]));
     expect(rectangles).toEqual([[2, 0, 2], [0, 1, 3]]);
+  });
+  it("replaces only successfully refined rectangles and preserves failures", () => {
+    const rects = [{ id: "ok", label: "penis" }, { id: "failed", label: "penis" }];
+    const segment = { id: "ok", width: 4, height: 4, runs: [1, 3], score: 0.9 };
+    expect(mergeRefinedMasks(rects, [segment])).toEqual({ rects: [rects[1]], segments: [segment] });
   });
 });

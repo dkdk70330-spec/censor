@@ -2,7 +2,13 @@ export type HqSam2Status = { installed: boolean; downloading: boolean; bytes: nu
 export type HqSam2Progress = { received: number; total?: number };
 export type HqSam2Box = { id: string; x: number; y: number; width: number; height: number };
 export type HqSam2Segment = { id: string; width: number; height: number; runs: number[]; score: number };
-export type HqSam2RefineResult = { device: string; segments: HqSam2Segment[] };
+export type HqSam2RefineError = { id: string; message: string };
+export type HqSam2RefineResult = { device: string; segments: HqSam2Segment[]; errors?: HqSam2RefineError[] };
+
+export function mergeRefinedMasks<T extends { id: string }>(rects: readonly T[], segments: readonly HqSam2Segment[]) {
+  const refinedIds = new Set(segments.map((segment) => segment.id));
+  return { rects: rects.filter((rect) => !refinedIds.has(rect.id)), segments: [...segments] };
+}
 
 export function isTauriRuntime() { return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window; }
 

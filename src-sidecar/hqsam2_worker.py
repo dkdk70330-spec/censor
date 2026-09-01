@@ -39,15 +39,21 @@ def main() -> None:
     predictor.set_image(image)
 
     segments = []
+    errors = []
     for item in request["boxes"]:
-        box = np.asarray([item["x"], item["y"], item["x"] + item["width"], item["y"] + item["height"]], dtype=np.float32)
-        with torch.inference_mode():
-            masks, scores, _ = predictor.predict(box=box, multimask_output=True)
-        best = int(np.argmax(scores))
-        mask = masks[best] > 0
-        segments.append({"id": item["id"], "width": int(mask.shape[1]), "height": int(mask.shape[0]), "runs": encode_runs(mask), "score": float(scores[best])})
+        try:
+            box = np.asarray([item["x"], item["y"], item["x"] + item["width"], item["y"] + item["height"]], dtype=np.float32)
+            with torch.inference_mode():
+                masks, scores, _ = predictor.predict(box=box, multimask_output=True)
+            best = int(np.argmax(scores))
+            mask = masks[best] > 0
+            if not np.any(mask):
+                raise ValueError("empty mask")
+            segments.append({"id": item["id"], "width": int(mask.shape[1]), "height": int(mask.shape[0]), "runs": encode_runs(mask), "score": float(scores[best])})
+        except Exception as error:
+            errors.append({"id": item["id"], "message": str(error)})
 
-    Path(args.output).write_text(json.dumps({"device": device, "segments": segments}), encoding="utf-8")
+    Path(args.output).write_text(json.dumps({"device": device, "segments": segments, "errors": errors}), encoding="utf-8")
 
 
 if __name__ == "__main__":

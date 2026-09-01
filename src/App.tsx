@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Brush, Check, ChevronDown, CloudDownload, Download, Eraser, Eye, ImagePlus, LoaderCircle, Lock, Maximize2, MousePointer2, Redo2, ScanSearch, ShieldCheck, Trash2, Undo2, Upload } from "lucide-react";
 import { CENSOR_PRESETS, CUSTOM_CLASS_OPTIONS, DEFAULT_CUSTOM_CLASS_IDS, filterDetections, summarizeDetections, type CensorEffect, type CensorLevel } from "./lib/censor";
 import { detectNudity } from "./lib/erax";
-import { downloadHqSam2, forEachMaskRunRectangle, formatModelBytes, getHqSam2Status, isTauriRuntime, refineWithHqSam2, type HqSam2Segment, type HqSam2Status } from "./lib/hqsam2";
+import { downloadHqSam2, forEachMaskRunRectangle, formatModelBytes, getHqSam2Status, isTauriRuntime, mergeRefinedMasks, refineWithHqSam2, type HqSam2Segment, type HqSam2Status } from "./lib/hqsam2";
 import "./editor.css";
 import "./settings.css";
 
@@ -161,9 +161,10 @@ export function App() {
       source.getContext("2d")!.drawImage(image, 0, 0);
       const blob = await new Promise<Blob>((resolve, reject) => source.toBlob((value) => value ? resolve(value) : reject(new Error("이미지를 변환할 수 없습니다.")), "image/png"));
       const result = await refineWithHqSam2(new Uint8Array(await blob.arrayBuffer()), boxes);
-      commit({ rects: [], strokes: editorRef.current.strokes, segments: [...(editorRef.current.segments ?? []), ...result.segments] });
+      const merged = mergeRefinedMasks(boxes, result.segments);
+      commit({ rects: merged.rects, strokes: editorRef.current.strokes, segments: [...(editorRef.current.segments ?? []), ...merged.segments] });
       setSelectedId(null);
-      setMessage(`HQ-SAM 2 윤곽 마스크 ${result.segments.length}개 생성 완료 · ${result.device.toUpperCase()}`);
+      setMessage(`HQ-SAM 2 윤곽 마스크 ${result.segments.length}개 생성 완료${merged.rects.length ? ` · 실패 ${merged.rects.length}개는 사각형 유지` : ""} · ${result.device.toUpperCase()}`);
     } catch (error) {
       console.error(error);
       setMessage(error instanceof Error ? error.message : String(error));
@@ -268,11 +269,33 @@ export function App() {
         const y = clamp(item.y - padding, 0, image.naturalHeight);
         return { id: uid(), x, y, width: Math.min(image.naturalWidth - x, item.width + padding * 2), height: Math.min(image.naturalHeight - y, item.height + padding * 2), label: item.label, score: item.score, classId: item.id };
       });
-      commit({ ...editorRef.current, rects: [...editorRef.current.rects, ...rects] });
       const summary = summarizeDetections(rawDetections);
-      setMessage(rects.length
-        ? `${rawDetections.length}개 탐지 중 검열 대상 ${rects.length}개를 생성했습니다. 탐지 결과: ${summary}`
-        : `${rawDetections.length}개 탐지됨(${summary || "분류 없음"}). 현재 검열 범위에는 해당 부위가 없습니다. 검열 수준을 넓히거나 직접 설정을 확인하세요.`);
+      if (!rects.length) {
+        commit({ ...editorRef.current, rects: [...editorRef.current.rects] });
+        setMessage(`${rawDetections.length}개 탐지됨(${summary || "분류 없음"}). 현재 검열 범위에는 해당 부위가 없습니다. 검열 수준을 넓히거나 직접 설정을 확인하세요.`);
+      } else if (desktopRuntime && hqSam2.installed) {
+        setMessage(`EraX 탐지 완료 · HQ-SAM 2가 ${rects.length}개 영역의 윤곽을 정밀화하고 있습니다…`);
+        try {
+          const source = makeCanvas(image.naturalWidth, image.naturalHeight);
+          source.getContext("2d")!.drawImage(image, 0, 0);
+          const blob = await new Promise<Blob>((resolve, reject) => source.toBlob((value) => value ? resolve(value) : reject(new Error("이미지를 변환할 수 없습니다.")), "image/png"));
+          const result = await refineWithHqSam2(new Uint8Array(await blob.arrayBuffer()), rects);
+          const merged = mergeRefinedMasks(rects, result.segments);
+          commit({
+            rects: [...editorRef.current.rects, ...merged.rects],
+            strokes: editorRef.current.strokes,
+            segments: [...(editorRef.current.segments ?? []), ...merged.segments],
+          });
+          setMessage(`${rawDetections.length}개 탐지 · 윤곽 마스크 ${result.segments.length}개 생성${merged.rects.length ? ` · 실패 ${merged.rects.length}개는 사각형 유지` : ""} · ${result.device.toUpperCase()}`);
+        } catch (error) {
+          console.error("[HQ-SAM 2] 정밀화 실패, EraX 사각형을 유지합니다.", error);
+          commit({ ...editorRef.current, rects: [...editorRef.current.rects, ...rects] });
+          setMessage(`${rawDetections.length}개 탐지 · HQ-SAM 2 정밀화 실패로 ${rects.length}개 영역을 사각형으로 유지했습니다.`);
+        }
+      } else {
+        commit({ ...editorRef.current, rects: [...editorRef.current.rects, ...rects] });
+        setMessage(`${rawDetections.length}개 탐지 중 검열 대상 ${rects.length}개를 생성했습니다. 탐지 결과: ${summary}`);
+      }
     } catch (error) {
       console.error(error);
       setMessage("AI 분석에 실패했습니다. ONNX Runtime 지원 여부와 모델 파일을 확인해 주세요.");

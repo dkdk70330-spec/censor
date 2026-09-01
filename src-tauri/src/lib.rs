@@ -58,9 +58,17 @@ struct MaskSegment {
 }
 
 #[derive(Deserialize, Serialize)]
+struct RefineError {
+    id: String,
+    message: String,
+}
+
+#[derive(Deserialize, Serialize)]
 struct RefineResult {
     device: String,
     segments: Vec<MaskSegment>,
+    #[serde(default)]
+    errors: Vec<RefineError>,
 }
 
 fn sidecar_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -94,6 +102,7 @@ async fn refine_hq_sam2(
         return Ok(RefineResult {
             device: "none".into(),
             segments: vec![],
+            errors: vec![],
         });
     }
     let checkpoint = model_path(&app)?;
