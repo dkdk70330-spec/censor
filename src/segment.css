@@ -1,0 +1,38 @@
+.mask-list {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #ececf1;
+  display: grid;
+  gap: 4px;
+}
+
+.mask-list-title {
+  margin: 0 3px 3px;
+  color: #8b93a0;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.mask-list button {
+  height: 30px;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: #f7f7f9;
+  color: #505866;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.mask-list button small { color: #969daa; font-size: 8px; }
+.mask-list button.selected { border-color: #d9c8ff; background: #f3eeff; color: #6d28d9; }
+.segment-controls { margin-top: 9px; padding: 10px; border: 1px solid #e5dcff; border-radius: 9px; background: #faf8ff; }
+.segment-control-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; font-size: 10px; }
+.segment-control-title span { color: #8b8197; font-size: 9px; }
+.segment-button-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.segment-button-grid button { min-height: 29px; padding: 4px; border: 1px solid #ded8e9; border-radius: 6px; background: #fff; color: #5d526a; font-size: 9px; font-weight: 700; cursor: pointer; }
+.segment-button-grid button:hover:not(:disabled) { border-color: #a78bfa; color: #6d28d9; }
+.segment-button-grid button:disabled { opacity: .45; }

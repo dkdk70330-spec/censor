@@ -2,9 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Brush, Check, ChevronDown, CloudDownload, Download, Eraser, Eye, ImagePlus, LoaderCircle, Lock, Maximize2, MousePointer2, Redo2, ScanSearch, ShieldCheck, Trash2, Undo2, Upload } from "lucide-react";
 import { CENSOR_PRESETS, CUSTOM_CLASS_OPTIONS, DEFAULT_CUSTOM_CLASS_IDS, filterDetections, summarizeDetections, type CensorEffect, type CensorLevel } from "./lib/censor";
 import { detectNudity } from "./lib/erax";
-import { downloadHqSam2, forEachMaskRunRectangle, formatModelBytes, getHqSam2Status, isTauriRuntime, mergeRefinedMasks, refineWithHqSam2, type HqSam2Segment, type HqSam2Status } from "./lib/hqsam2";
+import { downloadHqSam2, forEachMaskRunRectangle, formatModelBytes, getHqSam2Status, isTauriRuntime, maskContainsPoint, mergeRefinedMasks, morphSegment, refineWithHqSam2, segmentBounds, type HqSam2Segment, type HqSam2Status } from "./lib/hqsam2";
 import "./editor.css";
 import "./settings.css";
+import "./segment.css";
 
 export type Point = { x: number; y: number };
 export type MaskRect = { id: string; x: number; y: number; width: number; height: number; label?: string; score?: number; classId?: number };
@@ -26,8 +27,18 @@ export function drawMask(ctx: CanvasRenderingContext2D, editor: EditorState) {
   ctx.fillStyle = "#fff";
   ctx.globalCompositeOperation = "source-over";
   editor.rects.forEach((rect) => ctx.fillRect(rect.x, rect.y, rect.width, rect.height));
-  editor.segments?.forEach((segment) => {
-    forEachMaskRunRectangle(segment.width, segment.runs, (x, y, length) => ctx.fillRect(x, y, length, 1));
+  editor.segments?.filter((segment) => segment.visible !== false).forEach((segment) => {
+    if (segment.feather) {
+      const layer = makeCanvas(width, height);
+      const layerCtx = layer.getContext("2d")!;
+      layerCtx.fillStyle = "#fff";
+      forEachMaskRunRectangle(segment.width, segment.runs, (x, y, length) => layerCtx.fillRect(x, y, length, 1));
+      ctx.filter = `blur(${segment.feather}px)`;
+      ctx.drawImage(layer, 0, 0);
+      ctx.filter = "none";
+    } else {
+      forEachMaskRunRectangle(segment.width, segment.runs, (x, y, length) => ctx.fillRect(x, y, length, 1));
+    }
   });
   editor.strokes.forEach((stroke) => {
     if (!stroke.points.length) return;
@@ -171,6 +182,37 @@ export function App() {
     } finally { setRefining(false); }
   };
 
+  const refineSelectedContour = async () => {
+    const segment = editorRef.current.segments?.find((item) => item.id === selectedId);
+    const bounds = segment && segmentBounds(segment);
+    if (!image || !segment || !bounds || !hqSam2.installed || refining) return;
+    const padding = Math.max(8, Math.min(bounds.width, bounds.height) * 0.08);
+    const box = {
+      id: segment.id,
+      x: clamp(bounds.x - padding, 0, image.naturalWidth),
+      y: clamp(bounds.y - padding, 0, image.naturalHeight),
+      width: Math.min(image.naturalWidth - Math.max(0, bounds.x - padding), bounds.width + padding * 2),
+      height: Math.min(image.naturalHeight - Math.max(0, bounds.y - padding), bounds.height + padding * 2),
+    };
+    setRefining(true);
+    setMessage("선택한 윤곽을 HQ-SAM 2로 다시 계산하고 있습니다…");
+    try {
+      const source = makeCanvas(image.naturalWidth, image.naturalHeight);
+      source.getContext("2d")!.drawImage(image, 0, 0);
+      const blob = await new Promise<Blob>((resolve, reject) => source.toBlob((value) => value ? resolve(value) : reject(new Error("이미지를 변환할 수 없습니다.")), "image/png"));
+      const result = await refineWithHqSam2(new Uint8Array(await blob.arrayBuffer()), [box]);
+      const refined = result.segments[0];
+      if (!refined) throw new Error(result.errors?.[0]?.message || "윤곽을 생성하지 못했습니다.");
+      refined.visible = segment.visible;
+      refined.feather = segment.feather;
+      commit({ ...editorRef.current, segments: editorRef.current.segments?.map((item) => item.id === segment.id ? refined : item) });
+      setMessage(`선택 윤곽 재정밀화 완료 · ${result.device.toUpperCase()}`);
+    } catch (error) {
+      console.error(error);
+      setMessage(`재정밀화 실패 · 기존 윤곽을 유지합니다. ${error instanceof Error ? error.message : String(error)}`);
+    } finally { setRefining(false); }
+  };
+
   const effectSettings: EffectSettings = { effect, blur: blurStrength, mosaic: mosaicSize };
 
   const loadFile = useCallback((file?: File) => {
@@ -217,6 +259,15 @@ export function App() {
       });
       ctx.restore();
     }
+    const selectedSegment = editor.segments?.find((segment) => segment.id === selectedId && segment.visible !== false);
+    if (selectedSegment && tool === "select") {
+      const ctx = canvas.getContext("2d")!;
+      ctx.save();
+      ctx.globalAlpha = 0.32;
+      ctx.fillStyle = "#7c3aed";
+      forEachMaskRunRectangle(selectedSegment.width, selectedSegment.runs, (x, y, length) => ctx.fillRect(x, y, length, 1));
+      ctx.restore();
+    }
   }, [blurStrength, correctionView, editor, effect, image, mosaicSize, selectedId, tool]);
   useEffect(render, [render]);
 
@@ -236,9 +287,16 @@ export function App() {
   }, [future]);
   const removeSelected = useCallback(() => {
     if (!selectedId) return;
-    commit({ ...editorRef.current, rects: editorRef.current.rects.filter((rect) => rect.id !== selectedId) });
+    commit({ ...editorRef.current, rects: editorRef.current.rects.filter((rect) => rect.id !== selectedId), segments: editorRef.current.segments?.filter((segment) => segment.id !== selectedId) });
     setSelectedId(null);
   }, [commit, selectedId]);
+
+  const updateSelectedSegment = (change: (segment: HqSam2Segment) => HqSam2Segment, notice: string) => {
+    const segments = editorRef.current.segments;
+    if (!selectedId || !segments?.some((segment) => segment.id === selectedId)) return;
+    commit({ ...editorRef.current, segments: segments.map((segment) => segment.id === selectedId ? change(segment) : segment) });
+    setMessage(notice);
+  };
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -308,6 +366,7 @@ export function App() {
     return { x: clamp((event.clientX - bounds.left) * canvas.width / bounds.width, 0, canvas.width), y: clamp((event.clientY - bounds.top) * canvas.height / bounds.height, 0, canvas.height) };
   };
   const hitRect = (point: Point) => [...editorRef.current.rects].reverse().find((rect) => point.x >= rect.x && point.x <= rect.x + rect.width && point.y >= rect.y && point.y <= rect.y + rect.height);
+  const hitSegment = (point: Point) => [...(editorRef.current.segments ?? [])].reverse().find((segment) => maskContainsPoint(segment, point.x, point.y));
   const hitHandle = (point: Point, rect: MaskRect) => {
     const radius = Math.max(14, (image?.naturalWidth ?? 1000) / 70);
     return [["nw", rect.x, rect.y], ["ne", rect.x + rect.width, rect.y], ["sw", rect.x, rect.y + rect.height], ["se", rect.x + rect.width, rect.y + rect.height]].find((item) => Math.abs(point.x - Number(item[1])) <= radius && Math.abs(point.y - Number(item[2])) <= radius)?.[0] as string | undefined;
@@ -326,7 +385,12 @@ export function App() {
     const current = editorRef.current.rects.find((rect) => rect.id === selectedId);
     const handle = current ? hitHandle(point, current) : undefined;
     const rect = handle ? current : hitRect(point);
-    if (!rect) { setSelectedId(null); return; }
+    if (!rect) {
+      const segment = hitSegment(point);
+      setSelectedId(segment?.id ?? null);
+      dragRef.current = null;
+      return;
+    }
     setSelectedId(rect.id);
     dragRef.current = { kind: handle ? "resize" : "move", start: point, base, rect: { ...rect }, handle };
   };
@@ -380,6 +444,7 @@ export function App() {
 
   const chooseTool = (next: Tool) => { setTool(next); if (next !== "select") setSelectedId(null); };
   const toggleCustom = (id: number) => setCustomIds((items) => items.includes(id) ? items.filter((item) => item !== id) : [...items, id]);
+  const selectedSegmentControl = editor.segments?.find((segment) => segment.id === selectedId);
 
   return <div className="app-shell">
     <header className="topbar">
@@ -434,10 +499,24 @@ export function App() {
         </section>
 
         <section><div className="section-label">편집 도구</div><div className="tool-list">
-          <button className={tool === "select" ? "tool active" : "tool"} onClick={() => chooseTool("select")}><MousePointer2 /><span><strong>선택 및 이동</strong><small>사각형 조정·삭제</small></span><kbd>V</kbd></button>
+          <button className={tool === "select" ? "tool active" : "tool"} onClick={() => chooseTool("select")}><MousePointer2 /><span><strong>선택 및 이동</strong><small>사각형·윤곽 선택 및 삭제</small></span><kbd>V</kbd></button>
           <button className={tool === "brush" ? "tool active" : "tool"} onClick={() => chooseTool("brush")}><Brush /><span><strong>마스크 브러시</strong><small>선택한 검열 효과 추가</small></span><kbd>B</kbd></button>
           <button className={tool === "eraser" ? "tool active" : "tool"} onClick={() => chooseTool("eraser")}><Eraser /><span><strong>마스크 지우개</strong><small>원본은 지우지 않음</small></span><kbd>E</kbd></button>
-        </div>{(tool === "brush" || tool === "eraser") && <div className="brush-control"><div><span>크기</span><strong>{brushSize}px</strong></div><input type="range" min="8" max="120" value={brushSize} onChange={(e) => setBrushSize(Number(e.target.value))} /></div>}{selectedId && <button className="delete-button" onClick={removeSelected}><Trash2 size={16} /> 선택 영역 삭제</button>}</section>
+        </div>{(tool === "brush" || tool === "eraser") && <div className="brush-control"><div><span>크기</span><strong>{brushSize}px</strong></div><input type="range" min="8" max="120" value={brushSize} onChange={(e) => setBrushSize(Number(e.target.value))} /></div>}
+          {!!editor.segments?.length && <div className="mask-list"><div className="mask-list-title">윤곽 마스크</div>{editor.segments.map((segment, index) => <button key={segment.id} className={selectedId === segment.id ? "selected" : ""} onClick={() => { setTool("select"); setSelectedId(segment.id); }}><span>윤곽 {index + 1}</span><small>{segment.visible === false ? "숨김" : `점수 ${Math.round(segment.score * 100)}%`}</small></button>)}</div>}
+          {selectedSegmentControl && <div className="segment-controls">
+            <div className="segment-control-title"><strong>선택 윤곽 편집</strong><span>페더 {selectedSegmentControl.feather ?? 0}px</span></div>
+            <div className="segment-button-grid">
+              <button onClick={() => updateSelectedSegment((segment) => morphSegment(segment, 2), "선택 윤곽을 원본 기준 2px 확장했습니다.")}>윤곽 확대</button>
+              <button onClick={() => updateSelectedSegment((segment) => morphSegment(segment, -2), "선택 윤곽을 원본 기준 2px 축소했습니다.")}>윤곽 축소</button>
+              <button onClick={() => updateSelectedSegment((segment) => ({ ...segment, feather: clamp((segment.feather ?? 0) + 2, 0, 20) }), "선택 윤곽의 경계를 부드럽게 조정했습니다.")}>경계 +</button>
+              <button onClick={() => updateSelectedSegment((segment) => ({ ...segment, feather: clamp((segment.feather ?? 0) - 2, 0, 20) }), "선택 윤곽의 경계를 선명하게 조정했습니다.")}>경계 −</button>
+              <button onClick={() => updateSelectedSegment((segment) => ({ ...segment, visible: segment.visible === false }), selectedSegmentControl.visible === false ? "선택 윤곽을 표시했습니다." : "선택 윤곽을 숨겼습니다.")}>{selectedSegmentControl.visible === false ? "윤곽 표시" : "윤곽 숨김"}</button>
+              <button onClick={refineSelectedContour} disabled={refining}>{refining ? "계산 중" : "다시 정밀화"}</button>
+            </div>
+          </div>}
+          {selectedId && <button className="delete-button" onClick={removeSelected}><Trash2 size={16} /> 선택 영역 삭제</button>}
+        </section>
         <div className="local-card"><div className="local-check"><Check size={15} /></div><div><strong>100% 로컬 처리</strong><p>사진과 분석 결과는 서버로 전송되거나 저장되지 않습니다.</p></div></div>
       </aside>
 

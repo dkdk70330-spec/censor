@@ -1,13 +1,80 @@
 export type HqSam2Status = { installed: boolean; downloading: boolean; bytes: number; path?: string };
 export type HqSam2Progress = { received: number; total?: number };
 export type HqSam2Box = { id: string; x: number; y: number; width: number; height: number };
-export type HqSam2Segment = { id: string; width: number; height: number; runs: number[]; score: number };
+export type HqSam2Segment = { id: string; width: number; height: number; runs: number[]; score: number; visible?: boolean; feather?: number };
 export type HqSam2RefineError = { id: string; message: string };
 export type HqSam2RefineResult = { device: string; segments: HqSam2Segment[]; errors?: HqSam2RefineError[] };
 
 export function mergeRefinedMasks<T extends { id: string }>(rects: readonly T[], segments: readonly HqSam2Segment[]) {
   const refinedIds = new Set(segments.map((segment) => segment.id));
   return { rects: rects.filter((rect) => !refinedIds.has(rect.id)), segments: [...segments] };
+}
+
+export function maskContainsPoint(segment: HqSam2Segment, x: number, y: number) {
+  if (segment.visible === false || x < 0 || y < 0 || x >= segment.width || y >= segment.height) return false;
+  const target = Math.floor(y) * segment.width + Math.floor(x);
+  let low = 0;
+  let high = segment.runs.length / 2 - 1;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const start = segment.runs[middle * 2];
+    const end = segment.runs[middle * 2 + 1];
+    if (target < start) high = middle - 1;
+    else if (target >= end) low = middle + 1;
+    else return true;
+  }
+  return false;
+}
+
+export function segmentBounds(segment: HqSam2Segment) {
+  let minX = segment.width, minY = segment.height, maxX = -1, maxY = -1;
+  forEachMaskRunRectangle(segment.width, segment.runs, (x, y, length) => {
+    minX = Math.min(minX, x); minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x + length - 1); maxY = Math.max(maxY, y);
+  });
+  return maxX < 0 ? null : { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
+}
+
+function encodeBitmap(bitmap: Uint8Array) {
+  const runs: number[] = [];
+  let start = -1;
+  for (let index = 0; index <= bitmap.length; index++) {
+    const filled = index < bitmap.length && bitmap[index] !== 0;
+    if (filled && start < 0) start = index;
+    if (!filled && start >= 0) { runs.push(start, index); start = -1; }
+  }
+  return runs;
+}
+
+export function morphSegment(segment: HqSam2Segment, amount: number): HqSam2Segment {
+  const radius = Math.min(30, Math.abs(Math.trunc(amount)));
+  if (!radius) return { ...segment, runs: [...segment.runs] };
+  const { width, height } = segment;
+  const source = new Uint8Array(width * height);
+  for (let index = 0; index < segment.runs.length; index += 2) source.fill(1, segment.runs[index], segment.runs[index + 1]);
+  const horizontal = new Uint8Array(source.length);
+  const output = new Uint8Array(source.length);
+  const prefix = new Uint32Array(Math.max(width, height) + 1);
+  const erode = amount < 0;
+  for (let y = 0; y < height; y++) {
+    prefix[0] = 0;
+    for (let x = 0; x < width; x++) prefix[x + 1] = prefix[x] + source[y * width + x];
+    for (let x = 0; x < width; x++) {
+      const left = Math.max(0, x - radius), right = Math.min(width, x + radius + 1);
+      const sum = prefix[right] - prefix[left];
+      horizontal[y * width + x] = erode ? Number(left === x - radius && right === x + radius + 1 && sum === right - left) : Number(sum > 0);
+    }
+  }
+  for (let x = 0; x < width; x++) {
+    prefix[0] = 0;
+    for (let y = 0; y < height; y++) prefix[y + 1] = prefix[y] + horizontal[y * width + x];
+    for (let y = 0; y < height; y++) {
+      const top = Math.max(0, y - radius), bottom = Math.min(height, y + radius + 1);
+      const sum = prefix[bottom] - prefix[top];
+      output[y * width + x] = erode ? Number(top === y - radius && bottom === y + radius + 1 && sum === bottom - top) : Number(sum > 0);
+    }
+  }
+  return { ...segment, runs: encodeBitmap(output) };
 }
 
 export function isTauriRuntime() { return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window; }
