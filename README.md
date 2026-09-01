@@ -18,7 +18,7 @@ pnpm install
 pnpm dev
 ```
 
-프로덕션 빌드는 `npm run build`로 생성합니다. EraX 모델은 `public/models/erax`에 포함되어 있어 실행 중 외부 모델 서버에 접속하지 않습니다.
+GitHub Pages용 프로덕션 빌드는 `npm run build`로 생성하며 `/censor/` base를 사용합니다. Tauri 패키지는 `npm run build:desktop`으로 상대 경로 자산을 생성합니다. EraX 모델은 `public/models/erax`에 포함되어 있어 실행 중 외부 모델 서버에 접속하지 않습니다.
 
 ## 데스크톱 앱과 HQ-SAM 2
 

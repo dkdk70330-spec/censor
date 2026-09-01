@@ -3,7 +3,7 @@
   "productName": "Veil",
   "version": "0.1.0",
   "identifier": "app.veil.local",
-  "build": { "frontendDist": "../dist", "devUrl": "http://localhost:1420/censor/", "beforeDevCommand": "npm run dev -- --host 127.0.0.1", "beforeBuildCommand": "npm run build" },
+  "build": { "frontendDist": "../dist", "devUrl": "http://localhost:1420/censor/", "beforeDevCommand": "npm run dev -- --host 127.0.0.1", "beforeBuildCommand": "npm run build:desktop" },
   "app": {
     "withGlobalTauri": false,
     "windows": [{ "label": "main", "title": "Veil", "width": 1280, "height": 820, "minWidth": 960, "minHeight": 640, "resizable": true }],
