@@ -92,6 +92,17 @@ fn sidecar_path(app: &AppHandle) -> Result<PathBuf, String> {
         .join(executable))
 }
 
+fn sidecar_command(path: PathBuf) -> Command {
+    let mut command = Command::new(path);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 #[tauri::command]
 async fn refine_hq_sam2(
     app: AppHandle,
@@ -143,7 +154,7 @@ async fn refine_hq_sam2(
     let request_clone = request_path.clone();
     let output_clone = output_path.clone();
     let status = tauri::async_runtime::spawn_blocking(move || {
-        Command::new(sidecar_clone)
+        sidecar_command(sidecar_clone)
             .args(["--image"])
             .arg(image_clone)
             .args(["--checkpoint"])

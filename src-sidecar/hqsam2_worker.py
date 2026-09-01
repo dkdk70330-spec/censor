@@ -7,13 +7,14 @@ import numpy as np
 import torch
 import sys
 from PIL import Image
-from sam2.build_sam import build_sam2
-from sam2.sam2_image_predictor import SAM2ImagePredictor
 
 if getattr(sys, "frozen", False):
     # PyInstaller has no source files for TorchScript's inspect step. The
     # preprocessing sequence runs eagerly with the same operators instead.
     torch.jit.script = lambda module: module
+
+from sam2.build_sam import build_sam2
+from sam2.sam2_image_predictor import SAM2ImagePredictor
 
 
 def encode_runs(mask: np.ndarray) -> list[int]:
