@@ -2,14 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Brush, Check, ChevronDown, CloudDownload, Download, Eraser, Eye, ImagePlus, LoaderCircle, Lock, Maximize2, MousePointer2, Redo2, ScanSearch, ShieldCheck, Trash2, Undo2, Upload } from "lucide-react";
 import { CENSOR_PRESETS, CUSTOM_CLASS_OPTIONS, DEFAULT_CUSTOM_CLASS_IDS, filterDetections, summarizeDetections, type CensorEffect, type CensorLevel } from "./lib/censor";
 import { detectNudity } from "./lib/erax";
-import { downloadHqSam2, formatModelBytes, getHqSam2Status, isTauriRuntime, type HqSam2Status } from "./lib/hqsam2";
+import { downloadHqSam2, forEachMaskRunRectangle, formatModelBytes, getHqSam2Status, isTauriRuntime, refineWithHqSam2, type HqSam2Segment, type HqSam2Status } from "./lib/hqsam2";
 import "./editor.css";
 import "./settings.css";
 
 export type Point = { x: number; y: number };
 export type MaskRect = { id: string; x: number; y: number; width: number; height: number; label?: string; score?: number; classId?: number };
 export type Stroke = { id: string; points: Point[]; size: number; erase: boolean };
-export type EditorState = { rects: MaskRect[]; strokes: Stroke[] };
+export type EditorState = { rects: MaskRect[]; strokes: Stroke[]; segments?: HqSam2Segment[] };
 type Tool = "select" | "brush" | "eraser";
 type Drag = { kind: "move" | "resize" | "stroke"; start: Point; base: EditorState; rect?: MaskRect; handle?: string; strokeId?: string };
 type EffectSettings = { effect: CensorEffect; blur: number; mosaic: number };
@@ -26,6 +26,9 @@ export function drawMask(ctx: CanvasRenderingContext2D, editor: EditorState) {
   ctx.fillStyle = "#fff";
   ctx.globalCompositeOperation = "source-over";
   editor.rects.forEach((rect) => ctx.fillRect(rect.x, rect.y, rect.width, rect.height));
+  editor.segments?.forEach((segment) => {
+    forEachMaskRunRectangle(segment.width, segment.runs, (x, y, length) => ctx.fillRect(x, y, length, 1));
+  });
   editor.strokes.forEach((stroke) => {
     if (!stroke.points.length) return;
     ctx.globalCompositeOperation = stroke.erase ? "destination-out" : "source-over";
@@ -115,11 +118,18 @@ export function App() {
   const [desktopRuntime] = useState(isTauriRuntime);
   const [hqSam2, setHqSam2] = useState<HqSam2Status>({ installed: false, downloading: false, bytes: 0 });
   const [hqSam2Progress, setHqSam2Progress] = useState(0);
+  const [refining, setRefining] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const dragRef = useRef<Drag | null>(null);
   const editorRef = useRef(editor);
   editorRef.current = editor;
+
+  const commit = useCallback((next: EditorState) => {
+    setPast((items) => [...items.slice(-59), clone(editorRef.current)]);
+    setFuture([]);
+    setEditor(next);
+  }, []);
 
   useEffect(() => { if (desktopRuntime) getHqSam2Status().then(setHqSam2).catch(console.error); }, [desktopRuntime]);
 
@@ -141,13 +151,26 @@ export function App() {
     }
   };
 
-  const effectSettings: EffectSettings = { effect, blur: blurStrength, mosaic: mosaicSize };
+  const refineContours = async () => {
+    const boxes = editorRef.current.rects;
+    if (!image || !hqSam2.installed || !boxes.length || refining) return;
+    setRefining(true);
+    setMessage(`HQ-SAM 2가 ${boxes.length}개 영역의 윤곽을 계산하고 있습니다…`);
+    try {
+      const source = makeCanvas(image.naturalWidth, image.naturalHeight);
+      source.getContext("2d")!.drawImage(image, 0, 0);
+      const blob = await new Promise<Blob>((resolve, reject) => source.toBlob((value) => value ? resolve(value) : reject(new Error("이미지를 변환할 수 없습니다.")), "image/png"));
+      const result = await refineWithHqSam2(new Uint8Array(await blob.arrayBuffer()), boxes);
+      commit({ rects: [], strokes: editorRef.current.strokes, segments: [...(editorRef.current.segments ?? []), ...result.segments] });
+      setSelectedId(null);
+      setMessage(`HQ-SAM 2 윤곽 마스크 ${result.segments.length}개 생성 완료 · ${result.device.toUpperCase()}`);
+    } catch (error) {
+      console.error(error);
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally { setRefining(false); }
+  };
 
-  const commit = useCallback((next: EditorState) => {
-    setPast((items) => [...items.slice(-59), clone(editorRef.current)]);
-    setFuture([]);
-    setEditor(next);
-  }, []);
+  const effectSettings: EffectSettings = { effect, blur: blurStrength, mosaic: mosaicSize };
 
   const loadFile = useCallback((file?: File) => {
     if (!file || !file.type.startsWith("image/")) { setMessage("JPG, PNG 또는 WebP 사진을 선택해 주세요."); return; }
@@ -362,6 +385,10 @@ export function App() {
               {hqSam2.downloading ? <LoaderCircle className="spin" size={17} /> : hqSam2.installed ? <Check size={17} /> : <CloudDownload size={17} />}
               {hqSam2.downloading ? `다운로드 중 ${hqSam2Progress ? `${Math.round(hqSam2Progress * 100)}%` : `· ${formatModelBytes(hqSam2.bytes)}`}` : hqSam2.installed ? "설치 완료" : "HQ-SAM 2 다운로드"}
             </button>
+            {hqSam2.installed && <button className="analyze-button contour-button" onClick={refineContours} disabled={!image || !editor.rects.length || refining}>
+              {refining ? <LoaderCircle className="spin" size={17} /> : <ScanSearch size={17} />}
+              {refining ? "윤곽 계산 중" : "탐지 영역 윤곽 정밀화"}
+            </button>}
           </div>}
         </section>
 

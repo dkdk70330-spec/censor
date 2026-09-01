@@ -1,4 +1,8 @@
 node_modules/
 dist/
+build/
 .pnpm-store/
 src-tauri/target/
+src-tauri/binaries/*.exe
+__pycache__/
+*.pyc

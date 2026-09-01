@@ -8,7 +8,9 @@
     "build": "tsc -b && vite build",
     "check": "tsc -b --pretty false",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "sidecar:build": "powershell -ExecutionPolicy Bypass -File scripts/build-hqsam2-sidecar.ps1",
+    "tauri:bundle": "tauri build --config src-tauri/tauri.sidecar.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.6.0",

@@ -1,0 +1,7 @@
+HQ-SAM 2 / SAM 2 runtime
+Source: https://github.com/SysCV/sam-hq/tree/main/sam-hq2
+License: Apache License 2.0
+
+The Veil sidecar build installs the official HQ-SAM 2 package and bundles its
+runtime dependencies into a standalone executable. The model checkpoint is
+downloaded separately from the official link documented by the project.

@@ -3863,9 +3863,11 @@ dependencies = [
  "futures-util",
  "reqwest 0.12.28",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -1,8 +1,9 @@
 use futures_util::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::Command,
     sync::atomic::{AtomicBool, Ordering},
 };
 use tauri::{AppHandle, Emitter, Manager};
@@ -29,6 +30,136 @@ struct ModelStatus {
 struct DownloadProgress {
     received: u64,
     total: Option<u64>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RefineBox {
+    id: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RefineRequest {
+    boxes: Vec<RefineBox>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MaskSegment {
+    id: String,
+    width: u32,
+    height: u32,
+    runs: Vec<u32>,
+    score: f32,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RefineResult {
+    device: String,
+    segments: Vec<MaskSegment>,
+}
+
+fn sidecar_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let executable = if cfg!(target_os = "windows") {
+        "veil-hqsam2.exe"
+    } else {
+        "veil-hqsam2"
+    };
+    let bundled = std::env::current_exe()
+        .map_err(|error| error.to_string())?
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(executable);
+    if bundled.exists() {
+        return Ok(bundled);
+    }
+    Ok(app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?
+        .join(executable))
+}
+
+#[tauri::command]
+async fn refine_hq_sam2(
+    app: AppHandle,
+    image_bytes: Vec<u8>,
+    boxes: Vec<RefineBox>,
+) -> Result<RefineResult, String> {
+    if boxes.is_empty() {
+        return Ok(RefineResult {
+            device: "none".into(),
+            segments: vec![],
+        });
+    }
+    let checkpoint = model_path(&app)?;
+    if fs::metadata(&checkpoint)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+        != HQ_SAM2_BYTES
+    {
+        return Err("HQ-SAM 2 모델을 먼저 다운로드해 주세요.".into());
+    }
+    let sidecar = sidecar_path(&app)?;
+    if !sidecar.exists() {
+        return Err("HQ-SAM 2 추론 엔진이 설치되어 있지 않습니다.".into());
+    }
+    let work = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| error.to_string())?
+        .join(format!("hq-sam2-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&work)
+        .await
+        .map_err(|error| error.to_string())?;
+    let image_path = work.join("image.png");
+    let request_path = work.join("request.json");
+    let output_path = work.join("output.json");
+    tokio::fs::write(&image_path, image_bytes)
+        .await
+        .map_err(|error| error.to_string())?;
+    tokio::fs::write(
+        &request_path,
+        serde_json::to_vec(&RefineRequest { boxes }).map_err(|error| error.to_string())?,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let sidecar_clone = sidecar.clone();
+    let checkpoint_clone = checkpoint.clone();
+    let image_clone = image_path.clone();
+    let request_clone = request_path.clone();
+    let output_clone = output_path.clone();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        Command::new(sidecar_clone)
+            .args(["--image"])
+            .arg(image_clone)
+            .args(["--checkpoint"])
+            .arg(checkpoint_clone)
+            .args(["--request"])
+            .arg(request_clone)
+            .args(["--output"])
+            .arg(output_clone)
+            .status()
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    if !status.success() {
+        let _ = tokio::fs::remove_dir_all(&work).await;
+        return Err(format!("HQ-SAM 2 추론 엔진 종료 코드: {status}"));
+    }
+    let result: RefineResult = serde_json::from_slice(
+        &tokio::fs::read(&output_path)
+            .await
+            .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let _ = tokio::fs::remove_dir_all(&work).await;
+    Ok(result)
 }
 
 fn model_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -138,7 +269,11 @@ async fn download_hq_sam2(
 pub fn run() {
     tauri::Builder::default()
         .manage(DownloadState(AtomicBool::new(false)))
-        .invoke_handler(tauri::generate_handler![hq_sam2_status, download_hq_sam2])
+        .invoke_handler(tauri::generate_handler![
+            hq_sam2_status,
+            download_hq_sam2,
+            refine_hq_sam2
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Veil");
 }
