@@ -181,6 +181,73 @@ fn model_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
+async fn save_batch_output(
+    output_dir: String,
+    file_name: String,
+    image_bytes: Vec<u8>,
+) -> Result<String, String> {
+    let directory = PathBuf::from(output_dir);
+    let target = batch_output_path(&directory, &file_name)?;
+    tokio::fs::write(&target, image_bytes)
+        .await
+        .map_err(|error| format!("결과 저장 실패: {error}"))?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+fn batch_output_path(directory: &Path, file_name: &str) -> Result<PathBuf, String> {
+    if !directory.is_dir() {
+        return Err("선택한 출력 폴더를 찾을 수 없습니다.".into());
+    }
+    let supplied = Path::new(file_name);
+    if file_name.contains('/')
+        || file_name.contains('\\')
+        || supplied.file_name().and_then(|name| name.to_str()) != Some(file_name)
+    {
+        return Err("출력 파일명이 올바르지 않습니다.".into());
+    }
+    let extension = supplied
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "png" | "jpg" | "jpeg") {
+        return Err("PNG 또는 JPEG 파일만 저장할 수 있습니다.".into());
+    }
+    let stem = supplied
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("censored");
+    let mut target = directory.join(file_name);
+    let mut copy = 2u32;
+    while target.exists() {
+        target = directory.join(format!("{stem}-{copy}.{extension}"));
+        copy += 1;
+    }
+    Ok(target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::batch_output_path;
+    use std::fs;
+
+    #[test]
+    fn batch_output_stays_in_directory_and_avoids_overwrite() {
+        let directory =
+            std::env::temp_dir().join(format!("veil-batch-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("photo.png"), b"existing").unwrap();
+        assert_eq!(
+            batch_output_path(&directory, "photo.png").unwrap(),
+            directory.join("photo-2.png")
+        );
+        assert!(batch_output_path(&directory, "..\\escape.png").is_err());
+        assert!(batch_output_path(&directory, "result.txt").is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[tauri::command]
 fn hq_sam2_status(
     app: AppHandle,
     state: tauri::State<DownloadState>,
@@ -277,11 +344,13 @@ async fn download_hq_sam2(
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(DownloadState(AtomicBool::new(false)))
         .invoke_handler(tauri::generate_handler![
             hq_sam2_status,
             download_hq_sam2,
-            refine_hq_sam2
+            refine_hq_sam2,
+            save_batch_output
         ])
         .run(tauri::generate_context!())
         .expect("error while running Veil");

@@ -3,9 +3,11 @@ import { Brush, Check, ChevronDown, CloudDownload, Download, Eraser, Eye, ImageP
 import { CENSOR_PRESETS, CUSTOM_CLASS_OPTIONS, DEFAULT_CUSTOM_CLASS_IDS, filterDetections, summarizeDetections, type CensorEffect, type CensorLevel } from "./lib/censor";
 import { detectNudity } from "./lib/erax";
 import { downloadHqSam2, forEachMaskRunRectangle, formatModelBytes, getHqSam2Status, isTauriRuntime, maskContainsPoint, mergeRefinedMasks, morphSegment, refineWithHqSam2, segmentBounds, type HqSam2Segment, type HqSam2Status } from "./lib/hqsam2";
+import { batchOutputName, chooseBatchOutputDirectory, saveBatchOutput, type BatchFormat, type BatchStatus } from "./lib/batch";
 import "./editor.css";
 import "./settings.css";
 import "./segment.css";
+import "./batch.css";
 
 export type Point = { x: number; y: number };
 export type MaskRect = { id: string; x: number; y: number; width: number; height: number; label?: string; score?: number; classId?: number };
@@ -14,6 +16,7 @@ export type EditorState = { rects: MaskRect[]; strokes: Stroke[]; segments?: HqS
 type Tool = "select" | "brush" | "eraser";
 type Drag = { kind: "move" | "resize" | "stroke"; start: Point; base: EditorState; rect?: MaskRect; handle?: string; strokeId?: string };
 type EffectSettings = { effect: CensorEffect; blur: number; mosaic: number };
+type BatchItem = { id: string; file: File; status: BatchStatus; outputPath?: string; error?: string };
 
 export const EMPTY_EDITOR: EditorState = { rects: [], strokes: [] };
 const clone = (value: EditorState): EditorState => structuredClone(value);
@@ -64,6 +67,29 @@ function makeCanvas(width: number, height: number) {
   canvas.width = width;
   canvas.height = height;
   return canvas;
+}
+
+function canvasBlob(canvas: HTMLCanvasElement, type = "image/png", quality?: number) {
+  return new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error("이미지를 변환할 수 없습니다.")), type, quality));
+}
+
+function loadImageFile(file: File) {
+  return new Promise<{ image: HTMLImageElement; url: string }>((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => resolve({ image, url });
+    image.onerror = () => { URL.revokeObjectURL(url); reject(new Error("이미지를 읽을 수 없습니다.")); };
+    image.src = url;
+  });
+}
+
+function detectionRects(image: HTMLImageElement, detections: ReturnType<typeof filterDetections>) {
+  return detections.map((item) => {
+    const padding = Math.max(8, Math.min(item.width, item.height) * 0.08);
+    const x = clamp(item.x - padding, 0, image.naturalWidth);
+    const y = clamp(item.y - padding, 0, image.naturalHeight);
+    return { id: uid(), x, y, width: Math.min(image.naturalWidth - x, item.width + padding * 2), height: Math.min(image.naturalHeight - y, item.height + padding * 2), label: item.label, score: item.score, classId: item.id };
+  });
 }
 
 export function renderCensored(
@@ -130,9 +156,17 @@ export function App() {
   const [hqSam2, setHqSam2] = useState<HqSam2Status>({ installed: false, downloading: false, bytes: 0 });
   const [hqSam2Progress, setHqSam2Progress] = useState(0);
   const [refining, setRefining] = useState(false);
+  const [batchItems, setBatchItems] = useState<BatchItem[]>([]);
+  const [batchOutputDir, setBatchOutputDir] = useState("");
+  const [batchFormat, setBatchFormat] = useState<BatchFormat>("png");
+  const [batchSuffix, setBatchSuffix] = useState("-censored");
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchProgress, setBatchProgress] = useState(0);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const batchFileRef = useRef<HTMLInputElement>(null);
   const dragRef = useRef<Drag | null>(null);
+  const stopBatchRef = useRef(false);
   const editorRef = useRef(editor);
   editorRef.current = editor;
 
@@ -164,7 +198,7 @@ export function App() {
 
   const refineContours = async () => {
     const boxes = editorRef.current.rects;
-    if (!image || !hqSam2.installed || !boxes.length || refining) return;
+    if (!image || !hqSam2.installed || !boxes.length || refining || batchRunning) return;
     setRefining(true);
     setMessage(`HQ-SAM 2가 ${boxes.length}개 영역의 윤곽을 계산하고 있습니다…`);
     try {
@@ -185,7 +219,7 @@ export function App() {
   const refineSelectedContour = async () => {
     const segment = editorRef.current.segments?.find((item) => item.id === selectedId);
     const bounds = segment && segmentBounds(segment);
-    if (!image || !segment || !bounds || !hqSam2.installed || refining) return;
+    if (!image || !segment || !bounds || !hqSam2.installed || refining || batchRunning) return;
     const padding = Math.max(8, Math.min(bounds.width, bounds.height) * 0.08);
     const box = {
       id: segment.id,
@@ -313,7 +347,7 @@ export function App() {
   }, [redo, removeSelected, selectedId, undo]);
 
   const runDetection = async () => {
-    if (!image || analyzing) return;
+    if (!image || analyzing || batchRunning) return;
     setAnalyzing(true);
     setModelProgress(0);
     setMessage("EraX Small 모델을 준비하고 있습니다…");
@@ -321,12 +355,7 @@ export function App() {
       const rawDetections = await detectNudity(image, sensitivity, setModelProgress);
       const detections = filterDetections(rawDetections, level, customIds);
       console.info("[EraX] 사용자 검열 설정", { level, selectedIds: level === "custom" ? customIds : CENSOR_PRESETS[level], before: rawDetections.length, after: detections.length });
-      const rects = detections.map((item) => {
-        const padding = Math.max(8, Math.min(item.width, item.height) * 0.08);
-        const x = clamp(item.x - padding, 0, image.naturalWidth);
-        const y = clamp(item.y - padding, 0, image.naturalHeight);
-        return { id: uid(), x, y, width: Math.min(image.naturalWidth - x, item.width + padding * 2), height: Math.min(image.naturalHeight - y, item.height + padding * 2), label: item.label, score: item.score, classId: item.id };
-      });
+      const rects = detectionRects(image, detections);
       const summary = summarizeDetections(rawDetections);
       if (!rects.length) {
         commit({ ...editorRef.current, rects: [...editorRef.current.rects] });
@@ -358,6 +387,82 @@ export function App() {
       console.error(error);
       setMessage("AI 분석에 실패했습니다. ONNX Runtime 지원 여부와 모델 파일을 확인해 주세요.");
     } finally { setAnalyzing(false); }
+  };
+
+  const addBatchFiles = (files?: FileList | null) => {
+    const images = [...(files ?? [])].filter((file) => file.type.startsWith("image/"));
+    if (!images.length) { setMessage("배치 처리할 JPG, PNG 또는 WebP 파일을 선택해 주세요."); return; }
+    setBatchItems((items) => [...items, ...images.map((file) => ({ id: uid(), file, status: "pending" as const }))]);
+    if (batchFileRef.current) batchFileRef.current.value = "";
+    setMessage(`배치 대기열에 ${images.length}개 이미지를 추가했습니다.`);
+  };
+
+  const selectBatchOutput = async () => {
+    try {
+      const directory = await chooseBatchOutputDirectory();
+      if (directory) setBatchOutputDir(directory);
+    } catch (error) {
+      console.error(error);
+      setMessage("출력 폴더를 선택할 수 없습니다.");
+    }
+  };
+
+  const runBatch = async (includeErrors = false) => {
+    if (!desktopRuntime || batchRunning || analyzing || refining) return;
+    if (!batchOutputDir) { setMessage("배치 결과를 저장할 폴더를 먼저 선택해 주세요."); return; }
+    const queue = batchItems.filter((item) => item.status === "pending" || (includeErrors && item.status === "error"));
+    if (!queue.length) { setMessage("처리할 대기 이미지가 없습니다."); return; }
+    stopBatchRef.current = false;
+    setBatchRunning(true);
+    setBatchProgress(0);
+    let completed = 0;
+    let failed = 0;
+    for (let index = 0; index < queue.length; index++) {
+      if (stopBatchRef.current) break;
+      const item = queue[index];
+      setBatchItems((items) => items.map((entry) => entry.id === item.id ? { ...entry, status: "processing", error: undefined } : entry));
+      setMessage(`배치 ${index + 1}/${queue.length} · ${item.file.name} EraX 분석 중…`);
+      let loaded: { image: HTMLImageElement; url: string } | undefined;
+      try {
+        loaded = await loadImageFile(item.file);
+        const raw = await detectNudity(loaded.image, sensitivity, (fraction) => setBatchProgress((index + fraction * 0.35) / queue.length));
+        const rects = detectionRects(loaded.image, filterDetections(raw, level, customIds));
+        let batchEditor: EditorState = { rects, strokes: [] };
+        if (hqSam2.installed && rects.length) {
+          setMessage(`배치 ${index + 1}/${queue.length} · ${item.file.name} HQ-SAM 2 정밀화 중…`);
+          try {
+            const source = makeCanvas(loaded.image.naturalWidth, loaded.image.naturalHeight);
+            source.getContext("2d")!.drawImage(loaded.image, 0, 0);
+            const sourceBlob = await canvasBlob(source);
+            const refined = await refineWithHqSam2(new Uint8Array(await sourceBlob.arrayBuffer()), rects);
+            const merged = mergeRefinedMasks(rects, refined.segments);
+            batchEditor = { rects: merged.rects, strokes: [], segments: merged.segments };
+          } catch (error) {
+            console.error(`[배치] ${item.file.name} HQ-SAM 2 실패, 사각형 유지`, error);
+          }
+        }
+        setMessage(`배치 ${index + 1}/${queue.length} · ${item.file.name} 결과 렌더링 중…`);
+        const output = makeCanvas(loaded.image.naturalWidth, loaded.image.naturalHeight);
+        const mask = makeCanvas(output.width, output.height);
+        drawMask(mask.getContext("2d")!, batchEditor);
+        renderCensored(output.getContext("2d")!, loaded.image, mask, effectSettings, 1);
+        const mime = batchFormat === "jpeg" ? "image/jpeg" : "image/png";
+        const blob = await canvasBlob(output, mime, batchFormat === "jpeg" ? 0.92 : undefined);
+        const outputPath = await saveBatchOutput(batchOutputDir, batchOutputName(item.file.name, batchSuffix, batchFormat), new Uint8Array(await blob.arrayBuffer()));
+        setBatchItems((items) => items.map((entry) => entry.id === item.id ? { ...entry, status: "done", outputPath } : entry));
+        completed++;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        console.error(`[배치] ${item.file.name} 실패`, error);
+        setBatchItems((items) => items.map((entry) => entry.id === item.id ? { ...entry, status: "error", error: detail } : entry));
+        failed++;
+      } finally {
+        if (loaded) URL.revokeObjectURL(loaded.url);
+        setBatchProgress((index + 1) / queue.length);
+      }
+    }
+    setBatchRunning(false);
+    setMessage(stopBatchRef.current ? `배치 처리를 중단했습니다. 완료 ${completed}개 · 실패 ${failed}개` : `배치 처리 완료 · 성공 ${completed}개 · 실패 ${failed}개`);
   };
 
   const pointFromEvent = (event: React.PointerEvent<HTMLCanvasElement>): Point => {
@@ -463,7 +568,7 @@ export function App() {
             <div className="setting-row"><span>최소 신뢰도</span><strong>{Math.round(sensitivity * 100)}%</strong></div>
             <input className="full-range" aria-label="최소 탐지 신뢰도" type="range" min="0.1" max="0.8" step="0.05" value={sensitivity} onChange={(e) => setSensitivity(Number(e.target.value))} />
             <p>이 값은 탐지 개수만 조절합니다. 낮추면 오탐이 늘 수 있으며, 아래 검열 수준에서 실제 검열 부위를 선택합니다.</p>
-            <button className="analyze-button" onClick={runDetection} disabled={!image || analyzing}>{analyzing ? <LoaderCircle className="spin" size={17} /> : <ScanSearch size={17} />}{analyzing ? `분석 중 ${Math.round(modelProgress * 100)}%` : "AI 검열 실행"}</button>
+            <button className="analyze-button" onClick={runDetection} disabled={!image || analyzing || batchRunning}>{analyzing ? <LoaderCircle className="spin" size={17} /> : <ScanSearch size={17} />}{analyzing ? `분석 중 ${Math.round(modelProgress * 100)}%` : "AI 검열 실행"}</button>
           </div>
           {desktopRuntime && <div className="ai-card hq-card">
             <div className="ai-card-title"><div className="ai-icon"><CloudDownload size={18} /></div><div><strong>HQ-SAM 2</strong><small>탐지 사각형을 윤곽 마스크로 정밀화</small></div></div>
@@ -473,12 +578,38 @@ export function App() {
               {hqSam2.downloading ? <LoaderCircle className="spin" size={17} /> : hqSam2.installed ? <Check size={17} /> : <CloudDownload size={17} />}
               {hqSam2.downloading ? `다운로드 중 ${hqSam2Progress ? `${Math.round(hqSam2Progress * 100)}%` : `· ${formatModelBytes(hqSam2.bytes)}`}` : hqSam2.installed ? "설치 완료" : "HQ-SAM 2 다운로드"}
             </button>
-            {hqSam2.installed && <button className="analyze-button contour-button" onClick={refineContours} disabled={!image || !editor.rects.length || refining}>
+            {hqSam2.installed && <button className="analyze-button contour-button" onClick={refineContours} disabled={!image || !editor.rects.length || refining || batchRunning}>
               {refining ? <LoaderCircle className="spin" size={17} /> : <ScanSearch size={17} />}
               {refining ? "윤곽 계산 중" : "탐지 영역 윤곽 정밀화"}
             </button>}
           </div>}
         </section>
+
+        {desktopRuntime && <section className="batch-section">
+          <div className="section-label">다중 이미지 배치</div>
+          <div className="batch-actions-top">
+            <button onClick={() => batchFileRef.current?.click()} disabled={batchRunning}><ImagePlus size={15} /> 이미지 추가</button>
+            <button onClick={selectBatchOutput} disabled={batchRunning}><Download size={15} /> 출력 폴더</button>
+          </div>
+          <input ref={batchFileRef} type="file" accept="image/jpeg,image/png,image/webp" multiple hidden onChange={(event) => addBatchFiles(event.target.files)} />
+          <div className="batch-directory" title={batchOutputDir}>{batchOutputDir || "출력 폴더를 선택해 주세요"}</div>
+          <div className="batch-options">
+            <label><span>파일명 뒤</span><input value={batchSuffix} maxLength={40} disabled={batchRunning} onChange={(event) => setBatchSuffix(event.target.value)} /></label>
+            <label><span>형식</span><select value={batchFormat} disabled={batchRunning} onChange={(event) => setBatchFormat(event.target.value as BatchFormat)}><option value="png">PNG</option><option value="jpeg">JPEG 92%</option></select></label>
+          </div>
+          {!!batchItems.length && <div className="batch-queue">{batchItems.map((item) => <div key={item.id} className={`batch-item ${item.status}`} title={item.error || item.outputPath}>
+            <span className="batch-state">{item.status === "pending" ? "대기" : item.status === "processing" ? "처리" : item.status === "done" ? "완료" : "실패"}</span>
+            <span className="batch-name">{item.file.name}</span>
+            {!batchRunning && item.status !== "processing" && <button aria-label={`${item.file.name} 대기열에서 제거`} onClick={() => setBatchItems((items) => items.filter((entry) => entry.id !== item.id))}><Trash2 size={12} /></button>}
+          </div>)}</div>}
+          {batchRunning && <progress className="batch-progress" max="1" value={batchProgress} />}
+          <div className="batch-run-actions">
+            {!batchRunning ? <button className="batch-start" disabled={analyzing || refining || !batchItems.some((item) => item.status === "pending")} onClick={() => runBatch(false)}><ScanSearch size={15} /> 배치 시작</button> : <button className="batch-stop" onClick={() => { stopBatchRef.current = true; setMessage("현재 이미지가 끝나면 배치를 중단합니다…"); }}>현재 작업 후 중단</button>}
+            {!batchRunning && batchItems.some((item) => item.status === "error") && <button disabled={analyzing || refining} onClick={() => runBatch(true)}>실패 재시도</button>}
+            {!batchRunning && batchItems.some((item) => item.status === "done") && <button onClick={() => setBatchItems((items) => items.filter((item) => item.status !== "done"))}>완료 비우기</button>}
+          </div>
+          <p className="batch-note">한 장씩 순차 처리해 메모리 사용을 제한합니다. 같은 파일명이 있으면 번호를 붙여 기존 결과를 보존합니다.</p>
+        </section>}
 
         <section>
           <div className="section-label">검열 수준</div>
@@ -512,7 +643,7 @@ export function App() {
               <button onClick={() => updateSelectedSegment((segment) => ({ ...segment, feather: clamp((segment.feather ?? 0) + 2, 0, 20) }), "선택 윤곽의 경계를 부드럽게 조정했습니다.")}>경계 +</button>
               <button onClick={() => updateSelectedSegment((segment) => ({ ...segment, feather: clamp((segment.feather ?? 0) - 2, 0, 20) }), "선택 윤곽의 경계를 선명하게 조정했습니다.")}>경계 −</button>
               <button onClick={() => updateSelectedSegment((segment) => ({ ...segment, visible: segment.visible === false }), selectedSegmentControl.visible === false ? "선택 윤곽을 표시했습니다." : "선택 윤곽을 숨겼습니다.")}>{selectedSegmentControl.visible === false ? "윤곽 표시" : "윤곽 숨김"}</button>
-              <button onClick={refineSelectedContour} disabled={refining}>{refining ? "계산 중" : "다시 정밀화"}</button>
+              <button onClick={refineSelectedContour} disabled={refining || batchRunning}>{refining ? "계산 중" : "다시 정밀화"}</button>
             </div>
           </div>}
           {selectedId && <button className="delete-button" onClick={removeSelected}><Trash2 size={16} /> 선택 영역 삭제</button>}
