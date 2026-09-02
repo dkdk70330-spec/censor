@@ -4,6 +4,7 @@ import { CENSOR_PRESETS, CUSTOM_CLASS_OPTIONS, DEFAULT_CUSTOM_CLASS_IDS, filterD
 import { detectNudity } from "./lib/erax";
 import { downloadHqSam2, forEachMaskRunRectangle, formatModelBytes, getHqSam2Status, isTauriRuntime, maskContainsPoint, mergeRefinedMasks, morphSegment, refineWithHqSam2, segmentBounds, type HqSam2Segment, type HqSam2Status } from "./lib/hqsam2";
 import { batchOutputName, chooseBatchOutputDirectory, saveBatchOutput, type BatchFormat, type BatchStatus } from "./lib/batch";
+import { fitZoom } from "./lib/viewport";
 import "./editor.css";
 import "./settings.css";
 import "./segment.css";
@@ -166,6 +167,7 @@ export function App() {
   const [batchProgress, setBatchProgress] = useState(0);
   const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasAreaRef = useRef<HTMLElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const batchFileRef = useRef<HTMLInputElement>(null);
   const dragRef = useRef<Drag | null>(null);
@@ -264,6 +266,8 @@ export function App() {
       setFuture([]);
       setSelectedId(null);
       setActiveBatchId(batchId);
+      const area = canvasAreaRef.current;
+      setZoom(area ? fitZoom(loaded.naturalWidth, loaded.naturalHeight, area.clientWidth, area.clientHeight) : 100);
       setMessage(`${loaded.naturalWidth.toLocaleString()} × ${loaded.naturalHeight.toLocaleString()} · 브라우저 메모리에만 로드됨`);
     };
     loaded.onerror = () => { URL.revokeObjectURL(url); setMessage("사진을 읽을 수 없습니다."); };
@@ -768,9 +772,9 @@ export function App() {
         <div className="local-card"><div className="local-check"><Check size={15} /></div><div><strong>100% 로컬 처리</strong><p>사진과 분석 결과는 서버로 전송되거나 저장되지 않습니다.</p></div></div>
       </aside>
 
-      <section className="canvas-area">
-        {!image ? <button className={dragOver ? "drop-zone dragging" : "drop-zone"} onClick={() => fileRef.current?.click()}><div className="drop-icon"><ImagePlus size={28} /></div><h1>검열할 사진을 불러오세요</h1><p>여기로 끌어다 놓거나 클릭해서 선택하세요</p><span>JPG · PNG · WEBP</span></button> : <div className="canvas-scroll"><div className={`canvas-frame tool-${tool}`} style={{ width: `${zoom}%` }}><canvas ref={canvasRef} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp} /></div></div>}
-        <div className="statusbar"><span className="status-message"><span className="status-dot" />{message}</span>{image && <div className="zoom-control"><Maximize2 size={14} /><button onClick={() => setZoom((z) => clamp(z - 10, 30, 200))}>−</button><span>{zoom}%</span><button onClick={() => setZoom((z) => clamp(z + 10, 30, 200))}>+</button><ChevronDown size={13} /></div>}</div>
+      <section ref={canvasAreaRef} className="canvas-area">
+        {!image ? <button className={dragOver ? "drop-zone dragging" : "drop-zone"} onClick={() => fileRef.current?.click()}><div className="drop-icon"><ImagePlus size={28} /></div><h1>검열할 사진을 불러오세요</h1><p>여기로 끌어다 놓거나 클릭해서 선택하세요</p><span>JPG · PNG · WEBP</span></button> : <div className="canvas-scroll"><div className={`canvas-frame tool-${tool}`} style={{ width: `${image.naturalWidth * zoom / 100}px` }}><canvas ref={canvasRef} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp} /></div></div>}
+        <div className="statusbar"><span className="status-message"><span className="status-dot" />{message}</span>{image && <div className="zoom-control"><button className="fit-button" title="화면에 맞춤" onClick={() => setZoom(fitZoom(image.naturalWidth, image.naturalHeight, canvasAreaRef.current?.clientWidth ?? image.naturalWidth, canvasAreaRef.current?.clientHeight ?? image.naturalHeight))}><Maximize2 size={14} /></button><button onClick={() => setZoom((z) => clamp(z - 10, 10, 200))}>−</button><span>{zoom}%</span><button onClick={() => setZoom((z) => clamp(z + 10, 10, 200))}>+</button><ChevronDown size={13} /></div>}</div>
       </section>
     </main>
   </div>;
