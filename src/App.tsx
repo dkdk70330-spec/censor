@@ -16,12 +16,13 @@ export type EditorState = { rects: MaskRect[]; strokes: Stroke[]; segments?: HqS
 type Tool = "select" | "brush" | "eraser";
 type Drag = { kind: "move" | "resize" | "stroke"; start: Point; base: EditorState; rect?: MaskRect; handle?: string; strokeId?: string };
 type EffectSettings = { effect: CensorEffect; blur: number; mosaic: number };
-type BatchItem = { id: string; file: File; status: BatchStatus; outputPath?: string; error?: string };
+type BatchItem = { id: string; file: File; status: BatchStatus; editor?: EditorState; selected: boolean; outputPath?: string; error?: string };
 
 export const EMPTY_EDITOR: EditorState = { rects: [], strokes: [] };
 const clone = (value: EditorState): EditorState => structuredClone(value);
 const uid = () => crypto.randomUUID();
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const isImageFile = (file: File) => file.type.startsWith("image/") || /\.(jpe?g|png|webp)$/i.test(file.name);
 
 export function drawMask(ctx: CanvasRenderingContext2D, editor: EditorState) {
   const { width, height } = ctx.canvas;
@@ -162,6 +163,7 @@ export function App() {
   const [batchSuffix, setBatchSuffix] = useState("-censored");
   const [batchRunning, setBatchRunning] = useState(false);
   const [batchProgress, setBatchProgress] = useState(0);
+  const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const batchFileRef = useRef<HTMLInputElement>(null);
@@ -249,17 +251,18 @@ export function App() {
 
   const effectSettings: EffectSettings = { effect, blur: blurStrength, mosaic: mosaicSize };
 
-  const loadFile = useCallback((file?: File) => {
-    if (!file || !file.type.startsWith("image/")) { setMessage("JPG, PNG 또는 WebP 사진을 선택해 주세요."); return; }
+  const loadFile = useCallback((file?: File, initialEditor: EditorState = EMPTY_EDITOR, batchId: string | null = null) => {
+    if (!file || !isImageFile(file)) { setMessage("JPG, PNG 또는 WebP 사진을 선택해 주세요."); return; }
     const url = URL.createObjectURL(file);
     const loaded = new Image();
     loaded.onload = () => {
       setImage((previous) => { if (previous?.src.startsWith("blob:")) URL.revokeObjectURL(previous.src); return loaded; });
       setFileName(file.name);
-      setEditor(EMPTY_EDITOR);
+      setEditor(clone(initialEditor));
       setPast([]);
       setFuture([]);
       setSelectedId(null);
+      setActiveBatchId(batchId);
       setMessage(`${loaded.naturalWidth.toLocaleString()} × ${loaded.naturalHeight.toLocaleString()} · 브라우저 메모리에만 로드됨`);
     };
     loaded.onerror = () => { URL.revokeObjectURL(url); setMessage("사진을 읽을 수 없습니다."); };
@@ -391,12 +394,46 @@ export function App() {
   };
 
   const addBatchFiles = (files?: FileList | null) => {
-    const images = [...(files ?? [])].filter((file) => file.type.startsWith("image/"));
+    const images = [...(files ?? [])].filter(isImageFile);
     if (!images.length) { setMessage("배치 처리할 JPG, PNG 또는 WebP 파일을 선택해 주세요."); return; }
-    setBatchItems((items) => [...items, ...images.map((file) => ({ id: uid(), file, status: "pending" as const }))]);
+    setBatchItems((items) => [...items, ...images.map((file) => ({ id: uid(), file, status: "pending" as const, selected: false }))]);
     if (batchFileRef.current) batchFileRef.current.value = "";
     setMessage(`배치 대기열에 ${images.length}개 이미지를 추가했습니다.`);
   };
+
+  const acceptIncomingFiles = useCallback((files: File[]) => {
+    const images = files.filter(isImageFile);
+    if (!images.length) { setMessage("JPG, PNG 또는 WebP 이미지를 넣어 주세요."); return; }
+    if (desktopRuntime && images.length > 1) {
+      setBatchItems((items) => [...items, ...images.map((file) => ({ id: uid(), file, status: "pending" as const, selected: false }))]);
+      setMessage(`배치 대기열에 ${images.length}개 이미지를 추가했습니다.`);
+    } else {
+      loadFile(images[0]);
+    }
+  }, [desktopRuntime, loadFile]);
+
+  useEffect(() => {
+    const paste = (event: ClipboardEvent) => {
+      const clipboard = event.clipboardData;
+      const files = [...(clipboard?.files ?? [])];
+      if (!files.length) {
+        for (const item of [...(clipboard?.items ?? [])]) {
+          if (item.kind === "file" && item.type.startsWith("image/")) {
+            const file = item.getAsFile();
+            if (file) files.push(file);
+          }
+        }
+      }
+      if (files.some(isImageFile)) { event.preventDefault(); acceptIncomingFiles(files); }
+    };
+    window.addEventListener("paste", paste);
+    return () => window.removeEventListener("paste", paste);
+  }, [acceptIncomingFiles]);
+
+  useEffect(() => {
+    if (!activeBatchId) return;
+    setBatchItems((items) => items.map((item) => item.id === activeBatchId ? { ...item, editor: clone(editor), status: "done" } : item));
+  }, [activeBatchId, editor]);
 
   const selectBatchOutput = async () => {
     try {
@@ -410,7 +447,6 @@ export function App() {
 
   const runBatch = async (includeErrors = false) => {
     if (!desktopRuntime || batchRunning || analyzing || refining) return;
-    if (!batchOutputDir) { setMessage("배치 결과를 저장할 폴더를 먼저 선택해 주세요."); return; }
     const queue = batchItems.filter((item) => item.status === "pending" || (includeErrors && item.status === "error"));
     if (!queue.length) { setMessage("처리할 대기 이미지가 없습니다."); return; }
     stopBatchRef.current = false;
@@ -442,15 +478,7 @@ export function App() {
             console.error(`[배치] ${item.file.name} HQ-SAM 2 실패, 사각형 유지`, error);
           }
         }
-        setMessage(`배치 ${index + 1}/${queue.length} · ${item.file.name} 결과 렌더링 중…`);
-        const output = makeCanvas(loaded.image.naturalWidth, loaded.image.naturalHeight);
-        const mask = makeCanvas(output.width, output.height);
-        drawMask(mask.getContext("2d")!, batchEditor);
-        renderCensored(output.getContext("2d")!, loaded.image, mask, effectSettings, 1);
-        const mime = batchFormat === "jpeg" ? "image/jpeg" : "image/png";
-        const blob = await canvasBlob(output, mime, batchFormat === "jpeg" ? 0.92 : undefined);
-        const outputPath = await saveBatchOutput(batchOutputDir, batchOutputName(item.file.name, batchSuffix, batchFormat), new Uint8Array(await blob.arrayBuffer()));
-        setBatchItems((items) => items.map((entry) => entry.id === item.id ? { ...entry, status: "done", outputPath } : entry));
+        setBatchItems((items) => items.map((entry) => entry.id === item.id ? { ...entry, status: "done", editor: batchEditor, outputPath: undefined } : entry));
         completed++;
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
@@ -463,7 +491,83 @@ export function App() {
       }
     }
     setBatchRunning(false);
-    setMessage(stopBatchRef.current ? `배치 처리를 중단했습니다. 완료 ${completed}개 · 실패 ${failed}개` : `배치 처리 완료 · 성공 ${completed}개 · 실패 ${failed}개`);
+    setMessage(stopBatchRef.current ? `배치 분석을 중단했습니다. 검토 가능 ${completed}개 · 실패 ${failed}개` : `배치 분석 완료 · 검토 가능 ${completed}개 · 실패 ${failed}개`);
+  };
+
+  const openBatchItem = (item: BatchItem) => {
+    if (item.status !== "done" || !item.editor || batchRunning) return;
+    loadFile(item.file, item.id === activeBatchId ? editorRef.current : item.editor, item.id);
+    setMessage(`${item.file.name} 검열 결과를 편집기에 열었습니다.`);
+  };
+
+  const saveReviewed = async (scope: "current" | "selected" | "all") => {
+    if (batchRunning) return;
+    let directory = batchOutputDir;
+    if (!directory) {
+      try {
+        directory = await chooseBatchOutputDirectory() ?? "";
+      } catch (error) {
+        console.error(error);
+        setMessage("출력 폴더를 선택할 수 없습니다.");
+        return;
+      }
+      if (!directory) return;
+      setBatchOutputDir(directory);
+    }
+    const targets = batchItems.filter((item) => item.status === "done" && item.editor && (
+      scope === "all" || (scope === "current" ? item.id === activeBatchId : item.selected)
+    ));
+    if (!targets.length) { setMessage("저장할 검토 완료 이미지를 선택해 주세요."); return; }
+    setBatchRunning(true);
+    setBatchProgress(0);
+    let saved = 0;
+    let failed = 0;
+    for (let index = 0; index < targets.length; index++) {
+      const item = targets[index];
+      let loaded: { image: HTMLImageElement; url: string } | undefined;
+      try {
+        setMessage(`저장 ${index + 1}/${targets.length} · ${item.file.name}`);
+        loaded = await loadImageFile(item.file);
+        const itemEditor = item.id === activeBatchId ? editorRef.current : item.editor!;
+        const output = makeCanvas(loaded.image.naturalWidth, loaded.image.naturalHeight);
+        const mask = makeCanvas(output.width, output.height);
+        drawMask(mask.getContext("2d")!, itemEditor);
+        renderCensored(output.getContext("2d")!, loaded.image, mask, effectSettings, 1);
+        const mime = batchFormat === "jpeg" ? "image/jpeg" : "image/png";
+        const blob = await canvasBlob(output, mime, batchFormat === "jpeg" ? 0.92 : undefined);
+        const outputPath = await saveBatchOutput(directory, batchOutputName(item.file.name, batchSuffix, batchFormat), new Uint8Array(await blob.arrayBuffer()));
+        setBatchItems((items) => items.map((entry) => entry.id === item.id ? { ...entry, outputPath, error: undefined } : entry));
+        saved++;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        setBatchItems((items) => items.map((entry) => entry.id === item.id ? { ...entry, error: `저장 실패: ${detail}` } : entry));
+        failed++;
+      } finally {
+        if (loaded) URL.revokeObjectURL(loaded.url);
+        setBatchProgress((index + 1) / targets.length);
+      }
+    }
+    setBatchRunning(false);
+    setMessage(`저장 완료 ${saved}개${failed ? ` · 실패 ${failed}개` : ""}`);
+  };
+
+  const deleteSelectedBatchItems = () => {
+    const deleting = new Set(batchItems.filter((item) => item.selected).map((item) => item.id));
+    if (!deleting.size) { setMessage("삭제할 이미지를 선택해 주세요."); return; }
+    setBatchItems((items) => items.filter((item) => !deleting.has(item.id)));
+    if (activeBatchId && deleting.has(activeBatchId)) {
+      setImage((current) => { if (current?.src.startsWith("blob:")) URL.revokeObjectURL(current.src); return null; });
+      setEditor(EMPTY_EDITOR); setPast([]); setFuture([]); setActiveBatchId(null); setFileName("");
+    }
+    setMessage(`대기열에서 이미지 ${deleting.size}개를 삭제했습니다. 원본 파일은 삭제되지 않았습니다.`);
+  };
+
+  const deleteBatchItem = (id: string) => {
+    setBatchItems((items) => items.filter((item) => item.id !== id));
+    if (activeBatchId !== id) return;
+    setImage((current) => { if (current?.src.startsWith("blob:")) URL.revokeObjectURL(current.src); return null; });
+    setEditor(EMPTY_EDITOR); setPast([]); setFuture([]); setSelectedId(null); setActiveBatchId(null); setFileName("");
+    setMessage("대기열에서 이미지를 삭제했습니다. 원본 파일은 삭제되지 않았습니다.");
   };
 
   const pointFromEvent = (event: React.PointerEvent<HTMLCanvasElement>): Point => {
@@ -552,7 +656,7 @@ export function App() {
   const toggleCustom = (id: number) => setCustomIds((items) => items.includes(id) ? items.filter((item) => item !== id) : [...items, id]);
   const selectedSegmentControl = editor.segments?.find((segment) => segment.id === selectedId);
 
-  return <div className="app-shell">
+  return <div className="app-shell" onDragOver={(event) => { event.preventDefault(); setDragOver(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragOver(false); }} onDrop={(event) => { event.preventDefault(); setDragOver(false); acceptIncomingFiles([...event.dataTransfer.files]); }}>
     <header className="topbar">
       <div className="brand"><div className="brand-mark"><ShieldCheck size={19} /></div><span>Veil</span><span className="brand-tag">LOCAL AI</span></div>
       <div className="history-controls"><button className="icon-button" onClick={undo} disabled={!past.length} title="실행 취소"><Undo2 /></button><button className="icon-button" onClick={redo} disabled={!future.length} title="다시 실행"><Redo2 /></button></div>
@@ -560,7 +664,7 @@ export function App() {
     </header>
     <main className="workspace">
       <aside className="sidebar">
-        <section><div className="section-label">사진</div><button className="upload-button" onClick={() => fileRef.current?.click()}><Upload size={18} /> 사진 불러오기</button><input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" hidden onChange={(e) => loadFile(e.target.files?.[0])} /></section>
+        <section><div className="section-label">사진</div><button className="upload-button" onClick={() => fileRef.current?.click()}><Upload size={18} /> 사진 불러오기</button><input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" hidden onChange={(e) => loadFile(e.target.files?.[0])} /><div className="input-hint">파일을 끌어놓거나 복사한 이미지를 Ctrl+V로 붙여넣을 수 있습니다.</div></section>
 
         <section>
           <div className="section-label">AI 자동 검열</div>
@@ -598,18 +702,21 @@ export function App() {
             <label><span>파일명 뒤</span><input value={batchSuffix} maxLength={40} disabled={batchRunning} onChange={(event) => setBatchSuffix(event.target.value)} /></label>
             <label><span>형식</span><select value={batchFormat} disabled={batchRunning} onChange={(event) => setBatchFormat(event.target.value as BatchFormat)}><option value="png">PNG</option><option value="jpeg">JPEG 92%</option></select></label>
           </div>
-          {!!batchItems.length && <div className="batch-queue">{batchItems.map((item) => <div key={item.id} className={`batch-item ${item.status}`} title={item.error || item.outputPath}>
-            <span className="batch-state">{item.status === "pending" ? "대기" : item.status === "processing" ? "처리" : item.status === "done" ? "완료" : "실패"}</span>
-            <span className="batch-name">{item.file.name}</span>
-            {!batchRunning && item.status !== "processing" && <button aria-label={`${item.file.name} 대기열에서 제거`} onClick={() => setBatchItems((items) => items.filter((entry) => entry.id !== item.id))}><Trash2 size={12} /></button>}
+          {!!batchItems.length && <div className="batch-queue">{batchItems.map((item) => <div key={item.id} className={`batch-item ${item.status} ${activeBatchId === item.id ? "active" : ""}`} title={item.error || item.outputPath}>
+            <input type="checkbox" aria-label={`${item.file.name} 선택`} checked={item.selected} disabled={batchRunning} onChange={() => setBatchItems((items) => items.map((entry) => entry.id === item.id ? { ...entry, selected: !entry.selected } : entry))} />
+            <button className="batch-open" disabled={item.status !== "done" || batchRunning} onClick={() => openBatchItem(item)}><span className="batch-state">{item.status === "pending" ? "대기" : item.status === "processing" ? "분석" : item.status === "done" ? item.outputPath ? "저장됨" : "검토" : "실패"}</span><span className="batch-name">{item.file.name}</span></button>
+            {!batchRunning && <button aria-label={`${item.file.name} 대기열에서 제거`} onClick={() => deleteBatchItem(item.id)}><Trash2 size={12} /></button>}
           </div>)}</div>}
           {batchRunning && <progress className="batch-progress" max="1" value={batchProgress} />}
           <div className="batch-run-actions">
             {!batchRunning ? <button className="batch-start" disabled={analyzing || refining || !batchItems.some((item) => item.status === "pending")} onClick={() => runBatch(false)}><ScanSearch size={15} /> 배치 시작</button> : <button className="batch-stop" onClick={() => { stopBatchRef.current = true; setMessage("현재 이미지가 끝나면 배치를 중단합니다…"); }}>현재 작업 후 중단</button>}
             {!batchRunning && batchItems.some((item) => item.status === "error") && <button disabled={analyzing || refining} onClick={() => runBatch(true)}>실패 재시도</button>}
-            {!batchRunning && batchItems.some((item) => item.status === "done") && <button onClick={() => setBatchItems((items) => items.filter((item) => item.status !== "done"))}>완료 비우기</button>}
+            {!batchRunning && <button disabled={!activeBatchId} onClick={() => saveReviewed("current")}>단일 이미지 저장</button>}
+            {!batchRunning && <button disabled={!batchItems.some((item) => item.selected && item.status === "done")} onClick={() => saveReviewed("selected")}>선택 이미지 저장</button>}
+            {!batchRunning && <button disabled={!batchItems.some((item) => item.status === "done")} onClick={() => saveReviewed("all")}>모든 이미지 저장</button>}
+            {!batchRunning && <button className="batch-delete" disabled={!batchItems.some((item) => item.selected)} onClick={deleteSelectedBatchItems}>선택 이미지 삭제</button>}
           </div>
-          <p className="batch-note">한 장씩 순차 처리해 메모리 사용을 제한합니다. 같은 파일명이 있으면 번호를 붙여 기존 결과를 보존합니다.</p>
+          <p className="batch-note">분석 결과를 클릭해 편집한 뒤 원하는 시점에 저장합니다. 이미지 삭제는 대기열에서만 제거하며 원본 파일은 지우지 않습니다.</p>
         </section>}
 
         <section>
@@ -652,7 +759,7 @@ export function App() {
         <div className="local-card"><div className="local-check"><Check size={15} /></div><div><strong>100% 로컬 처리</strong><p>사진과 분석 결과는 서버로 전송되거나 저장되지 않습니다.</p></div></div>
       </aside>
 
-      <section className="canvas-area" onDragOver={(e) => { e.preventDefault(); setDragOver(true); }} onDragLeave={() => setDragOver(false)} onDrop={(e) => { e.preventDefault(); setDragOver(false); loadFile(e.dataTransfer.files[0]); }}>
+      <section className="canvas-area">
         {!image ? <button className={dragOver ? "drop-zone dragging" : "drop-zone"} onClick={() => fileRef.current?.click()}><div className="drop-icon"><ImagePlus size={28} /></div><h1>검열할 사진을 불러오세요</h1><p>여기로 끌어다 놓거나 클릭해서 선택하세요</p><span>JPG · PNG · WEBP</span></button> : <div className="canvas-scroll"><div className={`canvas-frame tool-${tool}`} style={{ width: `${zoom}%` }}><canvas ref={canvasRef} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp} /></div></div>}
         <div className="statusbar"><span className="status-message"><span className="status-dot" />{message}</span>{image && <div className="zoom-control"><Maximize2 size={14} /><button onClick={() => setZoom((z) => clamp(z - 10, 30, 200))}>−</button><span>{zoom}%</span><button onClick={() => setZoom((z) => clamp(z + 10, 30, 200))}>+</button><ChevronDown size={13} /></div>}</div>
       </section>
