@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import sys
+import cv2
 from PIL import Image
 
 if getattr(sys, "frozen", False):
@@ -34,10 +35,23 @@ def prompt_points(box: np.ndarray, attempt: int):
     if attempt == 1:
         return center, np.ones(1, dtype=np.int32)
     if x2 - x1 >= y2 - y1:
-        points = [[x1 + (x2 - x1) * ratio, center[0, 1]] for ratio in (0.35, 0.5, 0.65)]
+        positives = [[x1 + (x2 - x1) * ratio, center[0, 1]] for ratio in (0.35, 0.5, 0.65)]
     else:
-        points = [[center[0, 0], y1 + (y2 - y1) * ratio] for ratio in (0.35, 0.5, 0.65)]
-    return np.asarray(points, dtype=np.float32), np.ones(3, dtype=np.int32)
+        positives = [[center[0, 0], y1 + (y2 - y1) * ratio] for ratio in (0.35, 0.5, 0.65)]
+    margin = max(2.0, min(x2 - x1, y2 - y1) * 0.12)
+    negatives = [[x1 - margin, center[0, 1]], [x2 + margin, center[0, 1]], [center[0, 0], y1 - margin], [center[0, 0], y2 + margin]]
+    return np.asarray(positives + negatives, dtype=np.float32), np.asarray([1, 1, 1, 0, 0, 0, 0], dtype=np.int32)
+
+
+def center_component(mask: np.ndarray, box: np.ndarray):
+    x1, y1, x2, y2 = box
+    center_x = min(mask.shape[1] - 1, max(0, int((x1 + x2) / 2)))
+    center_y = min(mask.shape[0] - 1, max(0, int((y1 + y2) / 2)))
+    count, labels = cv2.connectedComponents(mask.astype(np.uint8), connectivity=8)
+    label = int(labels[center_y, center_x])
+    if count <= 1 or label == 0:
+        return np.zeros_like(mask, dtype=bool)
+    return labels == label
 
 
 def valid_candidate(mask: np.ndarray, box: np.ndarray):
@@ -51,15 +65,16 @@ def valid_candidate(mask: np.ndarray, box: np.ndarray):
     return area > box_area * 0.02 and area < box_area * 3 and inside / max(1, area) >= 0.65 and bool(mask[center_y, center_x])
 
 
-def predict_best_mask(predictor: SAM2ImagePredictor, box: np.ndarray):
+def predict_best_mask(predictor: SAM2ImagePredictor, box: np.ndarray, attempt_ids=(0, 1, 2)):
     best = None
     attempts = 0
-    for attempt in range(3):
+    for attempt in attempt_ids:
         points, labels = prompt_points(box, attempt)
         with torch.inference_mode():
             masks, scores, _ = predictor.predict(point_coords=points, point_labels=labels, box=box, multimask_output=True)
         attempts += 1
-        for mask, score in zip(masks > 0, scores):
+        for raw_mask, score in zip(masks > 0, scores):
+            mask = center_component(raw_mask, box)
             if valid_candidate(mask, box) and (best is None or float(score) > best[1]):
                 best = (mask, float(score))
         if best is not None and best[1] >= MIN_MASK_SCORE:
@@ -67,6 +82,27 @@ def predict_best_mask(predictor: SAM2ImagePredictor, box: np.ndarray):
     if best is None:
         raise ValueError("prompt box와 일치하는 윤곽 후보가 없습니다")
     raise ValueError(f"윤곽 점수 {best[1]:.0%}가 최소 기준 {MIN_MASK_SCORE:.0%} 미만입니다")
+
+
+def refine_box(model, image: np.ndarray, full_predictor: SAM2ImagePredictor, box: np.ndarray):
+    try:
+        return predict_best_mask(full_predictor, box, (0,))
+    except ValueError:
+        pass
+    height, width = image.shape[:2]
+    x1, y1, x2, y2 = box
+    padding = max(12, int(min(x2 - x1, y2 - y1) * 0.25))
+    roi_x1, roi_y1 = max(0, int(np.floor(x1)) - padding), max(0, int(np.floor(y1)) - padding)
+    roi_x2, roi_y2 = min(width, int(np.ceil(x2)) + padding), min(height, int(np.ceil(y2)) + padding)
+    crop = image[roi_y1:roi_y2, roi_x1:roi_x2]
+    local_box = np.asarray([x1 - roi_x1, y1 - roi_y1, x2 - roi_x1, y2 - roi_y1], dtype=np.float32)
+    roi_predictor = SAM2ImagePredictor(model)
+    roi_predictor.set_image(crop)
+    local_mask, score, attempts = predict_best_mask(roi_predictor, local_box, (1, 2))
+    full_mask = np.zeros((height, width), dtype=np.uint8)
+    full_mask[roi_y1:roi_y2, roi_x1:roi_x2] = local_mask.astype(np.uint8)
+    full_mask = cv2.dilate(full_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)), iterations=1)
+    return full_mask > 0, score, attempts + 1
 
 
 def main() -> None:
@@ -89,7 +125,7 @@ def main() -> None:
     for item in request["boxes"]:
         try:
             box = np.asarray([item["x"], item["y"], item["x"] + item["width"], item["y"] + item["height"]], dtype=np.float32)
-            mask, score, attempts = predict_best_mask(predictor, box)
+            mask, score, attempts = refine_box(model, image, predictor, box)
             segments.append({"id": item["id"], "width": int(mask.shape[1]), "height": int(mask.shape[0]), "runs": encode_runs(mask), "score": score, "attempts": attempts})
         except Exception as error:
             errors.append({"id": item["id"], "message": str(error)})

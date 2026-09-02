@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from hqsam2_worker import predict_best_mask, valid_candidate
+from hqsam2_worker import center_component, predict_best_mask, valid_candidate
 
 
 class FakePredictor:
@@ -28,6 +28,14 @@ class HqSam2RetryTests(unittest.TestCase):
     def test_rejects_a_mask_that_spreads_far_outside_the_box(self):
         mask = np.ones((20, 20), dtype=bool)
         self.assertFalse(valid_candidate(mask, np.asarray([8, 8, 12, 12], dtype=np.float32)))
+
+    def test_keeps_only_the_component_connected_to_the_box_center(self):
+        mask = np.zeros((12, 12), dtype=bool)
+        mask[4:8, 4:8] = True
+        mask[0:2, 0:2] = True
+        cleaned = center_component(mask, np.asarray([3, 3, 9, 9], dtype=np.float32))
+        self.assertTrue(cleaned[5, 5])
+        self.assertFalse(cleaned[0, 0])
 
 
 if __name__ == "__main__":

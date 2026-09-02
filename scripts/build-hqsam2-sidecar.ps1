@@ -19,7 +19,7 @@ if (-not (Test-Path (Join-Path $sourceRoot ".git"))) {
 } else {
   & git -C $sourceRoot pull --ff-only
 }
-$sitePackages = & $venvPython -c "import site; print(site.getsitepackages()[0])"
+$sitePackages = & $venvPython -c "import site; print(site.getsitepackages()[-1])"
 $sam2Configs = Join-Path $sitePackages "sam2\configs"
 New-Item -ItemType Directory -Force -Path $sam2Configs | Out-Null
 Copy-Item -Recurse -Force (Join-Path $sourceRoot "sam-hq2\sam2\configs\*") $sam2Configs
