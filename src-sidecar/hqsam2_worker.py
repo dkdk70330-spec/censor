@@ -105,19 +105,9 @@ def refine_box(model, image: np.ndarray, full_predictor: SAM2ImagePredictor, box
     return full_mask > 0, score, attempts + 1
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--image", required=True)
-    parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--request", required=True)
-    parser.add_argument("--output", required=True)
-    args = parser.parse_args()
-
-    request = json.loads(Path(args.request).read_text(encoding="utf-8"))
-    image = np.asarray(Image.open(args.image).convert("RGB")).copy()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = build_sam2("configs/sam2.1/sam2.1_hq_hiera_l.yaml", args.checkpoint, device=device)
-    predictor = SAM2ImagePredictor(model)
+def process_request(model, predictor: SAM2ImagePredictor, image_path: str, request_path: str, output_path: str, device: str) -> None:
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    image = np.asarray(Image.open(image_path).convert("RGB")).copy()
     predictor.set_image(image)
 
     segments = []
@@ -130,7 +120,33 @@ def main() -> None:
         except Exception as error:
             errors.append({"id": item["id"], "message": str(error)})
 
-    Path(args.output).write_text(json.dumps({"device": device, "segments": segments, "errors": errors}), encoding="utf-8")
+    Path(output_path).write_text(json.dumps({"device": device, "segments": segments, "errors": errors}), encoding="utf-8")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--image")
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--request")
+    parser.add_argument("--output")
+    parser.add_argument("--serve", action="store_true")
+    args = parser.parse_args()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = build_sam2("configs/sam2.1/sam2.1_hq_hiera_l.yaml", args.checkpoint, device=device)
+    predictor = SAM2ImagePredictor(model)
+    if args.serve:
+        for line in sys.stdin:
+            try:
+                job = json.loads(line)
+                process_request(model, predictor, job["image"], job["request"], job["output"], device)
+                print(json.dumps({"ok": True}), flush=True)
+            except Exception as error:
+                print(json.dumps({"ok": False, "error": str(error)}), flush=True)
+        return
+    if not args.image or not args.request or not args.output:
+        parser.error("--image, --request and --output are required unless --serve is used")
+    process_request(model, predictor, args.image, args.request, args.output, device)
 
 
 if __name__ == "__main__":

@@ -2,9 +2,13 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    process::Command,
-    sync::atomic::{AtomicBool, Ordering},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::{fs::File, io::AsyncWriteExt};
@@ -15,6 +19,14 @@ const HQ_SAM2_URL: &str =
 const HQ_SAM2_BYTES: u64 = 898_844_313;
 
 struct DownloadState(AtomicBool);
+
+struct HqSam2Worker {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+struct HqSam2WorkerState(Arc<Mutex<Option<HqSam2Worker>>>);
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,9 +115,103 @@ fn sidecar_command(path: PathBuf) -> Command {
     command
 }
 
+fn start_hq_sam2_worker(sidecar: &Path, checkpoint: &Path) -> Result<HqSam2Worker, String> {
+    let mut child = sidecar_command(sidecar.to_path_buf())
+        .arg("--checkpoint")
+        .arg(checkpoint)
+        .arg("--serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("HQ-SAM 2 워커 시작 실패: {error}"))?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or("HQ-SAM 2 워커 입력을 열 수 없습니다.")?;
+    let stdout = BufReader::new(
+        child
+            .stdout
+            .take()
+            .ok_or("HQ-SAM 2 워커 출력을 열 수 없습니다.")?,
+    );
+    Ok(HqSam2Worker {
+        child,
+        stdin,
+        stdout,
+    })
+}
+
+fn run_hq_sam2_worker(
+    state: &Arc<Mutex<Option<HqSam2Worker>>>,
+    sidecar: &Path,
+    checkpoint: &Path,
+    image: &Path,
+    request: &Path,
+    output: &Path,
+) -> Result<(), String> {
+    let job = serde_json::json!({
+        "image": image,
+        "request": request,
+        "output": output,
+    });
+    let encoded = serde_json::to_string(&job).map_err(|error| error.to_string())?;
+    for attempt in 0..2 {
+        let mut slot = state
+            .lock()
+            .map_err(|_| "HQ-SAM 2 워커 잠금 오류".to_string())?;
+        let stopped = slot
+            .as_mut()
+            .and_then(|worker| worker.child.try_wait().ok())
+            .flatten()
+            .is_some();
+        if slot.is_none() || stopped {
+            *slot = Some(start_hq_sam2_worker(sidecar, checkpoint)?);
+        }
+        let worker = slot.as_mut().expect("worker initialized");
+        let response = (|| -> Result<String, String> {
+            writeln!(worker.stdin, "{encoded}").map_err(|error| error.to_string())?;
+            worker.stdin.flush().map_err(|error| error.to_string())?;
+            let mut line = String::new();
+            if worker
+                .stdout
+                .read_line(&mut line)
+                .map_err(|error| error.to_string())?
+                == 0
+            {
+                return Err("HQ-SAM 2 워커가 응답 없이 종료되었습니다.".into());
+            }
+            Ok(line)
+        })();
+        match response {
+            Ok(line) => {
+                let value: serde_json::Value = serde_json::from_str(&line)
+                    .map_err(|error| format!("HQ-SAM 2 워커 응답 오류: {error}"))?;
+                if value.get("ok").and_then(|item| item.as_bool()) == Some(true) {
+                    return Ok(());
+                }
+                return Err(value
+                    .get("error")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or("HQ-SAM 2 처리 실패")
+                    .to_string());
+            }
+            Err(error) if attempt == 0 => {
+                if let Some(mut failed) = slot.take() {
+                    let _ = failed.child.kill();
+                }
+                drop(slot);
+                eprintln!("HQ-SAM 2 워커를 다시 시작합니다: {error}");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err("HQ-SAM 2 워커를 시작할 수 없습니다.".into())
+}
+
 #[tauri::command]
 async fn refine_hq_sam2(
     app: AppHandle,
+    worker_state: tauri::State<'_, HqSam2WorkerState>,
     image_bytes: Vec<u8>,
     boxes: Vec<RefineBox>,
 ) -> Result<RefineResult, String> {
@@ -148,29 +254,27 @@ async fn refine_hq_sam2(
     )
     .await
     .map_err(|error| error.to_string())?;
+    let worker_state = worker_state.0.clone();
     let sidecar_clone = sidecar.clone();
     let checkpoint_clone = checkpoint.clone();
     let image_clone = image_path.clone();
     let request_clone = request_path.clone();
     let output_clone = output_path.clone();
-    let status = tauri::async_runtime::spawn_blocking(move || {
-        sidecar_command(sidecar_clone)
-            .args(["--image"])
-            .arg(image_clone)
-            .args(["--checkpoint"])
-            .arg(checkpoint_clone)
-            .args(["--request"])
-            .arg(request_clone)
-            .args(["--output"])
-            .arg(output_clone)
-            .status()
+    let worker_result = tauri::async_runtime::spawn_blocking(move || {
+        run_hq_sam2_worker(
+            &worker_state,
+            &sidecar_clone,
+            &checkpoint_clone,
+            &image_clone,
+            &request_clone,
+            &output_clone,
+        )
     })
     .await
-    .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
-    if !status.success() {
+    if let Err(error) = worker_result {
         let _ = tokio::fs::remove_dir_all(&work).await;
-        return Err(format!("HQ-SAM 2 추론 엔진 종료 코드: {status}"));
+        return Err(error);
     }
     let result: RefineResult = serde_json::from_slice(
         &tokio::fs::read(&output_path)
@@ -357,6 +461,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(DownloadState(AtomicBool::new(false)))
+        .manage(HqSam2WorkerState(Arc::new(Mutex::new(None))))
         .invoke_handler(tauri::generate_handler![
             hq_sam2_status,
             download_hq_sam2,
