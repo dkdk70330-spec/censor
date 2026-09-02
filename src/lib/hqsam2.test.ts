@@ -15,7 +15,10 @@ describe("HQ-SAM 2 desktop model helpers", () => {
   it("replaces only successfully refined rectangles and preserves failures", () => {
     const rects = [{ id: "ok", label: "penis" }, { id: "failed", label: "penis" }];
     const segment = { id: "ok", width: 4, height: 4, runs: [1, 3], score: 0.9 };
-    expect(mergeRefinedMasks(rects, [segment])).toEqual({ rects: [rects[1]], segments: [segment] });
+    expect(mergeRefinedMasks(rects, [segment], [{ id: "failed", message: "low score" }])).toEqual({
+      rects: [{ ...rects[1], needsReview: true, reviewReason: "low score" }],
+      segments: [{ ...segment, label: "penis" }],
+    });
   });
   it("hit-tests and measures an asymmetric RLE contour", () => {
     const segment = { id: "mask", width: 6, height: 4, runs: [8, 10, 15, 17], score: 1 };

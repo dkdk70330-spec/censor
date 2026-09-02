@@ -29,6 +29,13 @@
 
 .mask-list button small { color: #969daa; font-size: 8px; }
 .mask-list button.selected { border-color: #d9c8ff; background: #f3eeff; color: #6d28d9; }
+.review-list button { border-color: #fde7b0; background: #fffbeb; color: #92400e; }
+.review-list button small { color: #b45309; }
+.review-list button.selected { border-color: #f59e0b; background: #fff7d6; color: #92400e; }
+.review-controls { margin-top: 9px; padding: 9px; border: 1px solid #f5cf78; border-radius: 9px; background: #fffbeb; color: #78350f; }
+.review-controls strong { font-size: 10px; }
+.review-controls p { margin: 4px 0 7px; font-size: 8px; line-height: 1.45; }
+.review-controls button { min-height: 29px; display: flex; align-items: center; justify-content: center; gap: 4px; width: 100%; border: 1px solid #f5cf78; border-radius: 6px; background: #fff; color: #92400e; font-size: 9px; font-weight: 700; cursor: pointer; }
 .segment-controls { margin-top: 9px; padding: 10px; border: 1px solid #e5dcff; border-radius: 9px; background: #faf8ff; }
 .segment-control-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; font-size: 10px; }
 .segment-control-title span { color: #8b8197; font-size: 9px; }

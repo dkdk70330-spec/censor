@@ -1,13 +1,20 @@
 export type HqSam2Status = { installed: boolean; downloading: boolean; bytes: number; path?: string };
 export type HqSam2Progress = { received: number; total?: number };
 export type HqSam2Box = { id: string; x: number; y: number; width: number; height: number };
-export type HqSam2Segment = { id: string; width: number; height: number; runs: number[]; score: number; visible?: boolean; feather?: number };
+export type HqSam2Segment = { id: string; width: number; height: number; runs: number[]; score: number; visible?: boolean; feather?: number; label?: string; classId?: number };
 export type HqSam2RefineError = { id: string; message: string };
 export type HqSam2RefineResult = { device: string; segments: HqSam2Segment[]; errors?: HqSam2RefineError[] };
 
-export function mergeRefinedMasks<T extends { id: string }>(rects: readonly T[], segments: readonly HqSam2Segment[]) {
+export function mergeRefinedMasks<T extends { id: string; label?: string; classId?: number }>(rects: readonly T[], segments: readonly HqSam2Segment[], errors: readonly HqSam2RefineError[] = []) {
   const refinedIds = new Set(segments.map((segment) => segment.id));
-  return { rects: rects.filter((rect) => !refinedIds.has(rect.id)), segments: [...segments] };
+  const errorById = new Map(errors.map((error) => [error.id, error.message]));
+  return {
+    rects: rects.filter((rect) => !refinedIds.has(rect.id)).map((rect) => ({ ...rect, needsReview: true, reviewReason: errorById.get(rect.id) || "윤곽을 생성하지 못해 탐지 사각형을 유지했습니다." })),
+    segments: segments.map((segment) => {
+      const source = rects.find((rect) => rect.id === segment.id);
+      return { ...segment, label: source?.label, classId: source?.classId };
+    }),
+  };
 }
 
 export function maskContainsPoint(segment: HqSam2Segment, x: number, y: number) {

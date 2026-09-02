@@ -10,7 +10,7 @@ import "./segment.css";
 import "./batch.css";
 
 export type Point = { x: number; y: number };
-export type MaskRect = { id: string; x: number; y: number; width: number; height: number; label?: string; score?: number; classId?: number };
+export type MaskRect = { id: string; x: number; y: number; width: number; height: number; label?: string; score?: number; classId?: number; needsReview?: boolean; reviewReason?: string };
 export type Stroke = { id: string; points: Point[]; size: number; erase: boolean };
 export type EditorState = { rects: MaskRect[]; strokes: Stroke[]; segments?: HqSam2Segment[] };
 type Tool = "select" | "brush" | "eraser";
@@ -23,6 +23,7 @@ const clone = (value: EditorState): EditorState => structuredClone(value);
 const uid = () => crypto.randomUUID();
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const isImageFile = (file: File) => file.type.startsWith("image/") || /\.(jpe?g|png|webp)$/i.test(file.name);
+export const reviewIssueCount = (state: EditorState) => state.rects.filter((rect) => rect.needsReview).length;
 
 export function drawMask(ctx: CanvasRenderingContext2D, editor: EditorState) {
   const { width, height } = ctx.canvas;
@@ -208,10 +209,10 @@ export function App() {
       source.getContext("2d")!.drawImage(image, 0, 0);
       const blob = await new Promise<Blob>((resolve, reject) => source.toBlob((value) => value ? resolve(value) : reject(new Error("이미지를 변환할 수 없습니다.")), "image/png"));
       const result = await refineWithHqSam2(new Uint8Array(await blob.arrayBuffer()), boxes);
-      const merged = mergeRefinedMasks(boxes, result.segments);
+      const merged = mergeRefinedMasks(boxes, result.segments, result.errors);
       commit({ rects: merged.rects, strokes: editorRef.current.strokes, segments: [...(editorRef.current.segments ?? []), ...merged.segments] });
       setSelectedId(null);
-      setMessage(`HQ-SAM 2 윤곽 마스크 ${result.segments.length}개 생성 완료${merged.rects.length ? ` · 실패 ${merged.rects.length}개는 사각형 유지` : ""} · ${result.device.toUpperCase()}`);
+      setMessage(`HQ-SAM 2 윤곽 마스크 ${result.segments.length}개 생성 완료${merged.rects.length ? ` · 실패 ${merged.rects.length}개는 확인 필요 사각형으로 유지` : ""} · ${result.device.toUpperCase()}`);
     } catch (error) {
       console.error(error);
       setMessage(error instanceof Error ? error.message : String(error));
@@ -284,7 +285,7 @@ export function App() {
       const handle = Math.max(8, canvas.width / 110);
       ctx.save();
       ctx.globalAlpha = 1;
-      ctx.strokeStyle = "#7c3aed";
+      ctx.strokeStyle = selected.needsReview ? "#f59e0b" : "#7c3aed";
       ctx.lineWidth = line;
       ctx.setLineDash([line * 4, line * 3]);
       ctx.strokeRect(selected.x, selected.y, selected.width, selected.height);
@@ -361,7 +362,7 @@ export function App() {
       const rects = detectionRects(image, detections);
       const summary = summarizeDetections(rawDetections);
       if (!rects.length) {
-        commit({ ...editorRef.current, rects: [...editorRef.current.rects] });
+        commit({ rects: [], strokes: editorRef.current.strokes, segments: [] });
         setMessage(`${rawDetections.length}개 탐지됨(${summary || "분류 없음"}). 현재 검열 범위에는 해당 부위가 없습니다. 검열 수준을 넓히거나 직접 설정을 확인하세요.`);
       } else if (desktopRuntime && hqSam2.installed) {
         setMessage(`EraX 탐지 완료 · HQ-SAM 2가 ${rects.length}개 영역의 윤곽을 정밀화하고 있습니다…`);
@@ -370,20 +371,20 @@ export function App() {
           source.getContext("2d")!.drawImage(image, 0, 0);
           const blob = await new Promise<Blob>((resolve, reject) => source.toBlob((value) => value ? resolve(value) : reject(new Error("이미지를 변환할 수 없습니다.")), "image/png"));
           const result = await refineWithHqSam2(new Uint8Array(await blob.arrayBuffer()), rects);
-          const merged = mergeRefinedMasks(rects, result.segments);
+          const merged = mergeRefinedMasks(rects, result.segments, result.errors);
           commit({
-            rects: [...editorRef.current.rects, ...merged.rects],
+            rects: merged.rects,
             strokes: editorRef.current.strokes,
-            segments: [...(editorRef.current.segments ?? []), ...merged.segments],
+            segments: merged.segments,
           });
-          setMessage(`${rawDetections.length}개 탐지 · 윤곽 마스크 ${result.segments.length}개 생성${merged.rects.length ? ` · 실패 ${merged.rects.length}개는 사각형 유지` : ""} · ${result.device.toUpperCase()}`);
+          setMessage(`${rawDetections.length}개 탐지 · 윤곽 마스크 ${result.segments.length}개 생성${merged.rects.length ? ` · 실패 ${merged.rects.length}개는 확인 필요 사각형으로 유지` : ""} · ${result.device.toUpperCase()}`);
         } catch (error) {
           console.error("[HQ-SAM 2] 정밀화 실패, EraX 사각형을 유지합니다.", error);
-          commit({ ...editorRef.current, rects: [...editorRef.current.rects, ...rects] });
-          setMessage(`${rawDetections.length}개 탐지 · HQ-SAM 2 정밀화 실패로 ${rects.length}개 영역을 사각형으로 유지했습니다.`);
+          commit({ rects: rects.map((rect) => ({ ...rect, needsReview: true, reviewReason: "HQ-SAM 2 정밀화 작업이 실패했습니다." })), strokes: editorRef.current.strokes, segments: [] });
+          setMessage(`${rawDetections.length}개 탐지 · HQ-SAM 2 정밀화 실패로 ${rects.length}개 영역을 확인 필요 사각형으로 유지했습니다.`);
         }
       } else {
-        commit({ ...editorRef.current, rects: [...editorRef.current.rects, ...rects] });
+        commit({ rects, strokes: editorRef.current.strokes, segments: [] });
         setMessage(`${rawDetections.length}개 탐지 중 검열 대상 ${rects.length}개를 생성했습니다. 탐지 결과: ${summary}`);
       }
     } catch (error) {
@@ -472,10 +473,11 @@ export function App() {
             source.getContext("2d")!.drawImage(loaded.image, 0, 0);
             const sourceBlob = await canvasBlob(source);
             const refined = await refineWithHqSam2(new Uint8Array(await sourceBlob.arrayBuffer()), rects);
-            const merged = mergeRefinedMasks(rects, refined.segments);
+            const merged = mergeRefinedMasks(rects, refined.segments, refined.errors);
             batchEditor = { rects: merged.rects, strokes: [], segments: merged.segments };
           } catch (error) {
             console.error(`[배치] ${item.file.name} HQ-SAM 2 실패, 사각형 유지`, error);
+            batchEditor = { rects: rects.map((rect) => ({ ...rect, needsReview: true, reviewReason: "HQ-SAM 2 정밀화 작업이 실패했습니다." })), strokes: [], segments: [] };
           }
         }
         setBatchItems((items) => items.map((entry) => entry.id === item.id ? { ...entry, status: "done", editor: batchEditor, outputPath: undefined } : entry));
@@ -518,6 +520,8 @@ export function App() {
       scope === "all" || (scope === "current" ? item.id === activeBatchId : item.selected)
     ));
     if (!targets.length) { setMessage("저장할 검토 완료 이미지를 선택해 주세요."); return; }
+    const unresolved = targets.reduce((count, item) => count + reviewIssueCount(item.id === activeBatchId ? editorRef.current : item.editor!), 0);
+    if (unresolved && !window.confirm(`확인하지 않은 실패 사각형이 ${unresolved}개 있습니다. 현재 검열 상태로 저장할까요?`)) return;
     setBatchRunning(true);
     setBatchProgress(0);
     let saved = 0;
@@ -638,6 +642,8 @@ export function App() {
 
   const exportImage = () => {
     if (!image) return;
+    const unresolved = reviewIssueCount(editorRef.current);
+    if (unresolved && !window.confirm(`확인하지 않은 실패 사각형이 ${unresolved}개 있습니다. 현재 검열 상태로 저장할까요?`)) return;
     const output = makeCanvas(image.naturalWidth, image.naturalHeight);
     const mask = makeCanvas(output.width, output.height);
     drawMask(mask.getContext("2d")!, editorRef.current);
@@ -655,6 +661,7 @@ export function App() {
   const chooseTool = (next: Tool) => { setTool(next); if (next !== "select") setSelectedId(null); };
   const toggleCustom = (id: number) => setCustomIds((items) => items.includes(id) ? items.filter((item) => item !== id) : [...items, id]);
   const selectedSegmentControl = editor.segments?.find((segment) => segment.id === selectedId);
+  const selectedReviewRect = editor.rects.find((rect) => rect.id === selectedId && rect.needsReview);
 
   return <div className="app-shell" onDragOver={(event) => { event.preventDefault(); setDragOver(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragOver(false); }} onDrop={(event) => { event.preventDefault(); setDragOver(false); acceptIncomingFiles([...event.dataTransfer.files]); }}>
     <header className="topbar">
@@ -742,7 +749,9 @@ export function App() {
           <button className={tool === "brush" ? "tool active" : "tool"} onClick={() => chooseTool("brush")}><Brush /><span><strong>마스크 브러시</strong><small>선택한 검열 효과 추가</small></span><kbd>B</kbd></button>
           <button className={tool === "eraser" ? "tool active" : "tool"} onClick={() => chooseTool("eraser")}><Eraser /><span><strong>마스크 지우개</strong><small>원본은 지우지 않음</small></span><kbd>E</kbd></button>
         </div>{(tool === "brush" || tool === "eraser") && <div className="brush-control"><div><span>크기</span><strong>{brushSize}px</strong></div><input type="range" min="8" max="120" value={brushSize} onChange={(e) => setBrushSize(Number(e.target.value))} /></div>}
-          {!!editor.segments?.length && <div className="mask-list"><div className="mask-list-title">윤곽 마스크</div>{editor.segments.map((segment, index) => <button key={segment.id} className={selectedId === segment.id ? "selected" : ""} onClick={() => { setTool("select"); setSelectedId(segment.id); }}><span>윤곽 {index + 1}</span><small>{segment.visible === false ? "숨김" : `점수 ${Math.round(segment.score * 100)}%`}</small></button>)}</div>}
+          {!!editor.segments?.length && <div className="mask-list"><div className="mask-list-title">윤곽 마스크</div>{editor.segments.map((segment, index) => <button key={segment.id} className={selectedId === segment.id ? "selected" : ""} onClick={() => { setTool("select"); setSelectedId(segment.id); }}><span>{segment.label || `윤곽 ${index + 1}`}</span><small>{segment.visible === false ? "숨김" : `점수 ${Math.round(segment.score * 100)}%`}</small></button>)}</div>}
+          {!!editor.rects.some((rect) => rect.needsReview) && <div className="mask-list review-list"><div className="mask-list-title">확인 필요한 사각형</div>{editor.rects.filter((rect) => rect.needsReview).map((rect, index) => <button key={rect.id} className={selectedId === rect.id ? "selected" : ""} title={rect.reviewReason} onClick={() => { setTool("select"); setSelectedId(rect.id); }}><span>{rect.label || `실패 사각형 ${index + 1}`}</span><small>{rect.score == null ? "확인 필요" : `탐지 ${Math.round(rect.score * 100)}%`}</small></button>)}</div>}
+          {selectedReviewRect && <div className="review-controls"><strong>윤곽 변환 실패</strong><p>{selectedReviewRect.reviewReason}</p><button onClick={() => { commit({ ...editorRef.current, rects: editorRef.current.rects.map((rect) => rect.id === selectedReviewRect.id ? { ...rect, needsReview: false, reviewReason: undefined } : rect) }); setMessage("선택한 사각형을 검열 영역으로 확인했습니다."); }}><Check size={13} /> 이 사각형 유지</button></div>}
           {selectedSegmentControl && <div className="segment-controls">
             <div className="segment-control-title"><strong>선택 윤곽 편집</strong><span>페더 {selectedSegmentControl.feather ?? 0}px</span></div>
             <div className="segment-button-grid">
