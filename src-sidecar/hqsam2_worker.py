@@ -62,7 +62,32 @@ def valid_candidate(mask: np.ndarray, box: np.ndarray):
     box_area = max(1, (x2i - x1i) * (y2i - y1i))
     inside = int(mask[y1i:y2i, x1i:x2i].sum())
     center_x, center_y = min(mask.shape[1] - 1, max(0, int((x1 + x2) / 2))), min(mask.shape[0] - 1, max(0, int((y1 + y2) / 2)))
-    return area > box_area * 0.02 and area < box_area * 3 and inside / max(1, area) >= 0.65 and bool(mask[center_y, center_x])
+    ys, xs = np.where(mask)
+    if not len(xs):
+        return False
+    width_ratio = (int(xs.max()) - int(xs.min()) + 1) / max(1, x2 - x1)
+    height_ratio = (int(ys.max()) - int(ys.min()) + 1) / max(1, y2 - y1)
+    return (
+        area > box_area * 0.02
+        and area < box_area * 1.8
+        and inside / max(1, area) >= 0.82
+        and width_ratio <= 1.65
+        and height_ratio <= 1.65
+        and bool(mask[center_y, center_x])
+    )
+
+
+def limit_mask_spill(mask: np.ndarray, box: np.ndarray, expansion=0.18):
+    """Hard-limit accepted output so connected skin cannot spread across the body."""
+    x1, y1, x2, y2 = box
+    margin_x, margin_y = (x2 - x1) * expansion, (y2 - y1) * expansion
+    left = max(0, int(np.floor(x1 - margin_x)))
+    top = max(0, int(np.floor(y1 - margin_y)))
+    right = min(mask.shape[1], int(np.ceil(x2 + margin_x)))
+    bottom = min(mask.shape[0], int(np.ceil(y2 + margin_y)))
+    limited = np.zeros_like(mask, dtype=bool)
+    limited[top:bottom, left:right] = mask[top:bottom, left:right]
+    return limited
 
 
 def predict_best_mask(predictor: SAM2ImagePredictor, box: np.ndarray, attempt_ids=(0, 1, 2)):
@@ -76,7 +101,7 @@ def predict_best_mask(predictor: SAM2ImagePredictor, box: np.ndarray, attempt_id
         for raw_mask, score in zip(masks > 0, scores):
             mask = center_component(raw_mask, box)
             if valid_candidate(mask, box) and (best is None or float(score) > best[1]):
-                best = (mask, float(score))
+                best = (limit_mask_spill(mask, box), float(score))
         if best is not None and best[1] >= MIN_MASK_SCORE:
             return best[0], best[1], attempts
     if best is None:

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Brush, Check, ChevronDown, CloudDownload, Download, Eraser, Eye, ImagePlus, LoaderCircle, Lock, Maximize2, MousePointer2, Redo2, ScanSearch, ShieldCheck, Trash2, Undo2, Upload } from "lucide-react";
-import { CENSOR_PRESETS, CUSTOM_CLASS_OPTIONS, DEFAULT_CUSTOM_CLASS_IDS, filterDetections, summarizeDetections, type CensorEffect, type CensorLevel } from "./lib/censor";
+import { CENSOR_PRESETS, CUSTOM_CLASS_OPTIONS, DEFAULT_CUSTOM_CLASS_IDS, deduplicateDetections, detectionQualityIssue, filterDetections, summarizeDetections, type CensorEffect, type CensorLevel } from "./lib/censor";
 import { detectNudity } from "./lib/erax";
 import { downloadHqSam2, forEachMaskRunRectangle, formatModelBytes, getHqSam2Status, isTauriRuntime, maskContainsPoint, mergeRefinedMasks, morphSegment, refineWithHqSam2, segmentBounds, type HqSam2Segment, type HqSam2Status } from "./lib/hqsam2";
 import { batchOutputName, chooseBatchOutputDirectory, saveBatchOutput, type BatchFormat, type BatchStatus } from "./lib/batch";
@@ -87,11 +87,11 @@ function loadImageFile(file: File) {
 }
 
 function detectionRects(image: HTMLImageElement, detections: ReturnType<typeof filterDetections>) {
-  return detections.map((item) => {
+  return deduplicateDetections(detections).map((item) => {
     const padding = Math.max(8, Math.min(item.width, item.height) * 0.08);
     const x = clamp(item.x - padding, 0, image.naturalWidth);
     const y = clamp(item.y - padding, 0, image.naturalHeight);
-    return { id: uid(), x, y, width: Math.min(image.naturalWidth - x, item.width + padding * 2), height: Math.min(image.naturalHeight - y, item.height + padding * 2), label: item.label, score: item.score, classId: item.id };
+    return { id: uid(), x, y, width: Math.min(image.naturalWidth - x, item.width + padding * 2), height: Math.min(image.naturalHeight - y, item.height + padding * 2), label: item.label, score: item.score, classId: item.id, reviewReason: detectionQualityIssue(item, image.naturalWidth, image.naturalHeight) };
   });
 }
 
