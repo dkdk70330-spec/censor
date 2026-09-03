@@ -90,6 +90,15 @@ def limit_mask_spill(mask: np.ndarray, box: np.ndarray, expansion=0.18):
     return limited
 
 
+def smooth_mask_edge(mask: np.ndarray):
+    """Remove one-pixel stair steps without materially changing the contour."""
+    source = mask.astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    closed = cv2.morphologyEx(source, cv2.MORPH_CLOSE, kernel, iterations=1)
+    softened = cv2.GaussianBlur(closed, (0, 0), sigmaX=0.8, sigmaY=0.8)
+    return softened >= 127
+
+
 def predict_best_mask(predictor: SAM2ImagePredictor, box: np.ndarray, attempt_ids=(0, 1, 2)):
     best = None
     attempts = 0
@@ -141,6 +150,7 @@ def process_request(model, predictor: SAM2ImagePredictor, image_path: str, reque
         try:
             box = np.asarray([item["x"], item["y"], item["x"] + item["width"], item["y"] + item["height"]], dtype=np.float32)
             mask, score, attempts = refine_box(model, image, predictor, box)
+            mask = smooth_mask_edge(mask)
             segments.append({"id": item["id"], "width": int(mask.shape[1]), "height": int(mask.shape[0]), "runs": encode_runs(mask), "score": score, "attempts": attempts})
         except Exception as error:
             errors.append({"id": item["id"], "message": str(error)})

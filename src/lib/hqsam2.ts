@@ -12,7 +12,7 @@ export function mergeRefinedMasks<T extends { id: string; label?: string; classI
     rects: rects.filter((rect) => !refinedIds.has(rect.id)).map((rect) => ({ ...rect, needsReview: true, reviewReason: [rect.reviewReason, errorById.get(rect.id)].filter(Boolean).join(" ") || "윤곽을 생성하지 못해 탐지 사각형을 유지했습니다." })),
     segments: segments.map((segment) => {
       const source = rects.find((rect) => rect.id === segment.id);
-      return { ...segment, label: source?.label, classId: source?.classId };
+      return { ...segment, feather: segment.feather ?? 1, label: source?.label, classId: source?.classId };
     }),
   };
 }

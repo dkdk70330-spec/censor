@@ -17,7 +17,7 @@ describe("HQ-SAM 2 desktop model helpers", () => {
     const segment = { id: "ok", width: 4, height: 4, runs: [1, 3], score: 0.9 };
     expect(mergeRefinedMasks(rects, [segment], [{ id: "failed", message: "low score" }])).toEqual({
       rects: [{ ...rects[1], needsReview: true, reviewReason: "low score" }],
-      segments: [{ ...segment, label: "penis" }],
+      segments: [{ ...segment, feather: 1, label: "penis" }],
     });
   });
   it("hit-tests and measures an asymmetric RLE contour", () => {
